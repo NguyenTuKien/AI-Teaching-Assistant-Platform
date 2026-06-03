@@ -13,7 +13,7 @@ Mục tiêu là xác định service nào cần scale ngang, service nào cần 
 ## 1.1. Context
 - Giả định hệ thống chạy trên server, chỉ giới hạn cho sinh viên trong trường sử dụng.
 - Ứng tính quy mô:
-    - Khi cao điểm có thể có khoảng 2000-3000 user active, 200-300 req/s.
+    - Khi cao điểm có thể có khoảng 1000 user active, 50-100 req/s.
     - Database: khoảng vài chục GB, chủ yếu là tài liệu, embedding và user info.
     - Trước mắt triển khai trên 3 môn học pivot là Học máy, Học sâu và Khai phá dữ liệu lớn.
 - Dự tính triển khai chính trên Kubernetes vì khả năng co giãn và quản lý tài nguyên tốt.
@@ -161,7 +161,7 @@ graph TD
     *   *Tại sao không dùng Longhorn làm chính cho PostgreSQL?* PostgreSQL production cần HA và phục hồi ở tầng database (do CloudNativePG quản lý) thay vì chỉ nhân bản vật lý thô ở tầng block storage (Longhorn). Longhorn chỉ dùng cho đĩa phụ của các workload không nhạy cảm độ trễ.
 *   **Cấu hình dự kiến**:
     *   *Dung lượng dữ liệu*: 100 – 300 GB.
-    *   *Tài nguyên/Pod*: 2 – 4 core CPU, 8 – 16 GB RAM (Limit: 16 – 32 GB RAM).
+    *   *Tài nguyên/Pod*: 2 – 4 core CPU, 4 – 8 GB RAM (Limit: 8 – 16 GB RAM).
     *   *Lưu trữ*: PVC 300 – 500 GB cho mỗi instance sử dụng StorageClass `local-nvme` (đĩa NVMe SSD vật lý gắn trực tiếp trên node máy chủ để tối đa hóa IOPS).
 
 ---
@@ -184,7 +184,7 @@ graph TD
     *   *Tại sao dùng Local PV/NVMe?* Tìm kiếm vector (ANN Search) yêu cầu độ trễ cực thấp và I/O đĩa rất lớn. Đặt Vector DB trên network block storage (như Longhorn) qua mạng LAN 1Gbps sẽ gây nghẽn băng thông nghiêm trọng. Qdrant bắt buộc phải truy xuất trực tiếp ổ đĩa NVMe cục bộ để đạt hiệu năng tối ưu.
 *   **Cấu hình dự kiến**:
     *   *Dung lượng index*: 50 – 150 GB (khoảng 5.000.000 vectors).
-    *   *Tài nguyên/Pod*: 2 – 4 core CPU, 8 – 16 GB RAM (Limit: 32 – 64 GB RAM để Qdrant load cache index vào RAM).
+    *   *Tài nguyên/Pod*: 2 – 4 core CPU, 4 – 8 GB RAM (Limit: 16 – 32 GB RAM để Qdrant load cache index vào RAM).
     *   *Lưu trữ*: PVC 500 GB – 1 TB dùng StorageClass `local-nvme` (Enterprise NVMe SSD gắn trực tiếp).
     *   *Backup*: Snapshot định kỳ và tự động upload lên MinIO.
 
@@ -214,8 +214,8 @@ Quy trình backup đa tầng tự động đảm bảo khả năng khôi phục 
 
 Cấu hình tối thiểu đề xuất cho **mỗi node máy chủ vật lý** trong cụm Kubernetes để chạy mượt mà toàn bộ Data Layer mốc 5 năm:
 
-*   **CPU**: 16 – 32 core.
-*   **RAM**: 128 GB.
+*   **CPU**: 8 – 16 core.
+*   **RAM**: 64 – 128 GB.
 *   **Disk hệ điều hành (OS)**: 1 × SSD 512 GB.
 *   **Disk dữ liệu nóng (Hot Data)**: 1 × Enterprise NVMe SSD 1.92 TB (sử dụng cho StorageClass `local-nvme` của PostgreSQL và Qdrant).
 *   **Disk lưu trữ đối tượng (Object/Archive)**: 1 – 2 × HDD Enterprise 8 TB (sử dụng cho StorageClass `local-hdd-object` của MinIO).
@@ -396,7 +396,7 @@ graph TB
 
 # 2. Phân tích các Bottleneck chính và Cơ chế giảm tải (Load Mitigation)
 
-Khi hệ thống AI Teaching Assistant Platform đi vào hoạt động thực tế với quy mô 2000 - 3000 sinh viên hoạt động đồng thời (đặc biệt là trong các đợt deadline bài tập lớn), hệ thống sẽ đối mặt với nhiều điểm nghẽn nghiêm trọng. Dưới đây là phần phân loại, phân tích nguyên nhân và các giải pháp kỹ thuật chi tiết.
+Khi hệ thống AI Teaching Assistant Platform đi vào hoạt động thực tế với quy mô khoảng 1000 sinh viên hoạt động đồng thời (đặc biệt là trong các đợt deadline bài tập lớn), hệ thống sẽ đối mặt với nhiều điểm nghẽn nghiêm trọng. Dưới đây là phần phân loại, phân tích nguyên nhân và các giải pháp kỹ thuật chi tiết.
 
 ---
 
@@ -481,7 +481,7 @@ mindmap
 Để bảo vệ hạ tầng K8s của trường không bị sập nguồn khi sinh viên nộp bài dồn dập:
 
 1.  **Hàng đợi chấm bài (Queue-based Webhook)**: Webhook push code gửi về từ GitHub sẽ không kích hoạt chạy test ngay lập tức mà được ghi nhận thành một task chấm bài trong hàng đợi Redis.
-2.  **Giới hạn Concurrent Workers**: Cấu hình số lượng CI Worker tối đa chạy đồng thời (ví dụ: tối đa 10 - 20 worker chạy song song tùy thuộc vào CPU/RAM còn trống của cụm Node vật lý). Các bài nộp còn lại sẽ nằm trong hàng đợi ở trạng thái `Pending`. Sinh viên có thể phải chờ 1 - 2 phút để nhận điểm, nhưng cụm K8s luôn hoạt động ổn định, không bị crash.
+2.  **Giới hạn Concurrent Workers**: Cấu hình số lượng CI Worker tối đa chạy đồng thời (ví dụ: tối đa 5 - 10 worker chạy song song tùy thuộc vào CPU/RAM còn trống của cụm Node vật lý). Các bài nộp còn lại sẽ nằm trong hàng đợi ở trạng thái `Pending`. Sinh viên có thể phải chờ 1 - 2 phút để nhận điểm, nhưng cụm K8s luôn hoạt động ổn định, không bị crash.
 3.  **Cách ly Sandbox bằng gVisor/sysbox**: Sử dụng các công nghệ container siêu nhẹ và an toàn để chạy code sinh viên, đồng thời giới hạn tài nguyên khắt khe cho mỗi sandbox pod (ví dụ: tối đa 0.5 CPU và 512MB RAM mỗi bài test) để ngăn chặn mã độc hoặc vòng lặp vô hạn của sinh viên phá hoại hệ thống.
 
 ---
@@ -506,3 +506,150 @@ mindmap
 | **Autograding (CI) (Nhóm 3)** | Hàng đợi chấm bài + Giới hạn Concurrent Pods | K8s Job + gVisor/sysbox | Bảo vệ cụm K8s khỏi sập nguồn do quá tải CPU/RAM, cô lập mã nguồn sinh viên an toàn. |
 | **Dashboard Analytics (Nhóm 4)** | Read Replica + Bảng tổng hợp trước | PostgreSQL Replica / Summary Tables | Tránh khóa bảng DB chính, load biểu đồ dashboard gần như ngay lập tức. |
 | **File Storage (Tất cả)** | Object Storage thay vì Local Disk | MinIO Tenant | Giải phóng bộ nhớ đĩa cục bộ, cho phép scale ngang backend dễ dàng (stateless). |
+
+---
+
+# 3. Tầng giám sát hệ thống (Monitoring Layer)
+
+Đây là tầng cuối cùng trong kiến trúc 7 lớp của hệ thống — và cũng là tầng thường bị bỏ qua cho đến khi có sự cố xảy ra. Tầng giám sát không phục vụ trực tiếp người dùng nhưng đóng vai trò thiết yếu để đảm bảo toàn bộ hệ thống vận hành ổn định, phát hiện lỗi sớm và hỗ trợ đội vận hành phản ứng kịp thời.
+
+---
+
+## 3.1. Ba trụ cột của Observability
+
+Observability (khả năng quan sát) của hệ thống hiện đại được xây dựng trên 3 trụ cột chính:
+
+```mermaid
+graph LR
+    subgraph Observability["🔭 Observability Stack"]
+        Metrics["📊 Metrics\n(Prometheus + Grafana)\nSố liệu đo lường\ntheo thời gian thực"]
+        Logs["📜 Logs\n(Loki / Fluentd)\nNhật ký sự kiện\ntừ tất cả service"]
+        Traces["🔍 Distributed Tracing\n(Tempo / Jaeger)\nLuồng xử lý\nxuyên suốt service"]
+    end
+
+    subgraph Alerts["🚨 Alerting"]
+        AM["Alertmanager\n(Threshold-based)"]
+        Grafana_Alert["Grafana Alerts\n(Anomaly-based)"]
+    end
+
+    subgraph Targets["🎯 Hệ thống được giám sát"]
+        K8s["☸️ Kubernetes Nodes"]
+        App["📦 App Services\n(CMS, AI, CI Worker)"]
+        DB["🐘 Databases\n(PG, Qdrant, Redis)"]
+        Infra["💾 Storage\n(MinIO, Longhorn)"]
+    end
+
+    Targets --> Metrics
+    Targets --> Logs
+    Targets --> Traces
+    Metrics --> AM
+    Metrics --> Grafana_Alert
+    AM -->|"Slack / Email / PagerDuty"| Team["👥 Đội vận hành"]
+    Grafana_Alert --> Team
+```
+
+---
+
+## 3.2. Metrics — Đo lường hiệu năng theo thời gian thực
+
+**Công nghệ chọn**: **Prometheus** (thu thập) + **Grafana** (trực quan hóa).
+
+### 3.2.1. Các nhóm metric quan trọng cần theo dõi
+
+#### Nhóm 1: Metrics cơ sở hạ tầng (Infrastructure)
+*   **Node Exporter**: CPU usage, RAM usage, Disk I/O (IOPS/throughput), Network I/O trên từng Node vật lý.
+*   **kube-state-metrics**: Trạng thái Pods (Running/Pending/CrashLoopBackOff), Deployment ready replicas, PVC Bound/Pending, Node conditions (Ready/NotReady).
+
+#### Nhóm 2: Metrics tầng ứng dụng (Application)
+*   **CMS Service & AI Service**: HTTP request rate, Error rate (4xx/5xx), P95/P99 latency theo từng endpoint.
+*   **CI/Autograding Worker**: Số task đang chạy, số task đang trong hàng đợi (Queue depth), thời gian trung bình chấm một bài.
+*   **RAG Worker**: Thời gian xử lý trung bình mỗi tài liệu (parse + chunk + embed), số tài liệu đang chờ xử lý.
+
+#### Nhóm 3: Metrics cơ sở dữ liệu (Database)
+*   **PostgreSQL (CloudNativePG)**: TPS (Transactions/giây), số kết nối active/idle, thời gian replication lag, cache hit ratio, các slow query (>1s).
+*   **Qdrant**: Query latency (ANN Search time), số vector đã index, throughput (requests/giây).
+*   **Redis**: Memory usage (%), hit rate, số kết nối, độ dài queue.
+
+#### Nhóm 4: Metrics lưu trữ (Storage)
+*   **MinIO**: Disk usage, Request rate (PUT/GET), Bandwidth consumed.
+*   **Longhorn**: Volume health status, Rebuild progress, IOPS/throughput của từng volume.
+
+---
+
+## 3.3. Logs — Nhật ký sự kiện tập trung
+
+**Công nghệ chọn**: **Promtail** (thu thập log từ các Pod) → **Loki** (lưu trữ & indexing log) → **Grafana** (tìm kiếm & trực quan hóa).
+
+*   **Ưu điểm của Loki so với Elasticsearch (ELK)**: Loki không index toàn bộ nội dung log mà chỉ index các label (metadata như `service`, `namespace`, `pod`). Điều này giúp Loki nhẹ hơn 90% so với ELK, phù hợp với cụm 3-Node có tài nguyên giới hạn.
+
+### 3.3.1. Chuẩn hóa định dạng log
+
+Tất cả các service phải xuất log theo định dạng **JSON có cấu trúc** để Loki có thể phân tích và lọc hiệu quả:
+
+```json
+{
+  "timestamp": "2025-06-03T08:30:00Z",
+  "level": "INFO",
+  "service": "ai-service",
+  "trace_id": "abc123def456",
+  "user_id": "student_001",
+  "course_id": "ML-2025",
+  "message": "RAG query completed",
+  "latency_ms": 340,
+  "retrieved_chunks": 5
+}
+```
+
+*   **`trace_id`**: Mã định danh duy nhất cho mỗi request, dùng để liên kết log từ nhiều service khác nhau (ví dụ: từ API Gateway → CMS Service → AI Service → Qdrant).
+
+---
+
+## 3.4. Distributed Tracing — Theo dõi luồng xử lý xuyên service
+
+**Công nghệ chọn**: **OpenTelemetry SDK** (instrument code) → **Tempo** (lưu trữ trace) → **Grafana** (trực quan hóa).
+
+Khi một sinh viên hỏi AI chatbot, request thực tế đi qua nhiều service: `API Gateway → AI Service → Qdrant → (LLM API)`. Nếu chỉ nhìn vào log riêng lẻ của từng service, rất khó xác định bước nào đang chiếm thời gian nhiều nhất.
+
+Distributed Tracing tạo ra một **Trace** duy nhất cho toàn bộ hành trình của request đó, bao gồm các **Span** con đại diện cho công việc của từng service:
+
+```txt
+Trace: student_question_abc123 (tổng 3.2s)
+├── [API Gateway] Auth & Rate limit check       →  12ms
+├── [AI Service] Embed student question          → 250ms
+├── [Qdrant]     ANN Search (course_id=ML-2025) → 180ms
+├── [AI Service] Build LLM prompt               →  15ms
+└── [LLM API]    Generate answer (stream)        → 2.74s  ← bottleneck!
+```
+
+---
+
+## 3.5. Alerting — Cảnh báo chủ động
+
+**Công nghệ chọn**: **Alertmanager** (đi kèm Prometheus) + **Grafana Alerts**, gửi thông báo qua Slack/Email.
+
+### 3.5.1. Các ngưỡng cảnh báo quan trọng (Alert Rules)
+
+| Cấp độ | Điều kiện kích hoạt | Hành động |
+| :--- | :--- | :--- |
+| 🔴 **CRITICAL** | Node CPU > 90% trong 5 phút liên tục | Cảnh báo Slack ngay + Email đội vận hành |
+| 🔴 **CRITICAL** | PostgreSQL Primary down > 30 giây | Cảnh báo ngay, CloudNativePG kích hoạt failover tự động |
+| 🟠 **WARNING** | CI Worker queue depth > 50 tasks đang chờ | Cảnh báo Slack, xem xét tăng số worker tạm thời |
+| 🟠 **WARNING** | AI Service P99 latency > 15 giây trong 2 phút | Cảnh báo Slack, kiểm tra LLM endpoint |
+| 🟡 **INFO** | MinIO disk usage > 75% | Nhắc nhở lên kế hoạch mở rộng dung lượng |
+| 🟡 **INFO** | PostgreSQL Replication lag > 30 giây | Kiểm tra băng thông mạng giữa các node |
+
+---
+
+## 3.6. Cấu hình tài nguyên cho Monitoring Stack
+
+Stack giám sát được triển khai trên cụm K8s trong namespace riêng (`monitoring`) và cần PVC để lưu dữ liệu lịch sử:
+
+| Thành phần | CPU Request | RAM Request | Storage (PVC) | StorageClass |
+| :--- | :--- | :--- | :--- | :--- |
+| **Prometheus** | 500m | 1 GB | 50 – 100 GB (15 ngày data) | `longhorn-replicated` |
+| **Grafana** | 200m | 256 MB | 5 GB (dashboards/config) | `longhorn-replicated` |
+| **Loki** | 500m | 512 MB | 50 – 100 GB (30 ngày log) | `longhorn-replicated` |
+| **Tempo** | 300m | 512 MB | 20 – 50 GB (7 ngày trace) | `longhorn-replicated` |
+| **Alertmanager** | 100m | 128 MB | 1 GB | `longhorn-replicated` |
+
+> Toàn bộ stack monitoring sử dụng `longhorn-replicated` để đảm bảo dữ liệu giám sát được nhân bản và không bị mất khi một node vật lý gặp sự cố. Không dùng `local-nvme` vì monitoring không cần I/O thấp — độ bền dữ liệu quan trọng hơn tốc độ.
