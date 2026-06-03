@@ -393,3 +393,116 @@ graph TB
 *   Khi Giảng viên upload slide/giáo trình mới trên **Tutor site**, **CMS Service** đẩy file vật lý vào **MinIO** và lưu metadata vào **PostgreSQL**.
 *   Một tiến trình background trigger **AI Service** lấy tài liệu từ MinIO, thực hiện bẻ nhỏ (chunking), chạy mô hình sinh vector (Embedding) và lưu index vào **Qdrant Vector Database**.
 *   Khi sinh viên hỏi đáp với chatbot AI trên **User site**, **AI Service** nhận câu hỏi, truy vấn ngữ nghĩa (ANN Search) đến **Qdrant** để lấy các đoạn tài liệu liên quan nhất, sau đó kết hợp với ngữ cảnh gửi đến mô hình ngôn ngữ lớn (LLM) để sinh câu trả lời chính xác, tránh hiện tượng ảo tưởng (hallucination).
+
+# 2. Phân tích các Bottleneck chính và Cơ chế giảm tải (Load Mitigation)
+
+Khi hệ thống AI Teaching Assistant Platform đi vào hoạt động thực tế với quy mô 2000 - 3000 sinh viên hoạt động đồng thời (đặc biệt là trong các đợt deadline bài tập lớn), hệ thống sẽ đối mặt với nhiều điểm nghẽn nghiêm trọng. Dưới đây là phần phân loại, phân tích nguyên nhân và các giải pháp kỹ thuật chi tiết.
+
+---
+
+## 2.1. Gom nhóm và phân tích nguyên nhân của các bottleneck
+
+Các điểm nghẽn của hệ thống được chia làm 4 nhóm chính dựa trên tính chất tài nguyên và luồng xử lý:
+
+```mermaid
+mindmap
+  root((Hệ thống Nghẽn))
+    Nhóm 1: Tải AI & RAG
+      Nhiều sinh viên hỏi AI cùng lúc
+      RAG quét Vector DB liên tục
+      Nguyên nhân: Latency LLM cao & Quét vector không lọc
+    Nhóm 2: Xử lý tài liệu
+      Upload tài liệu lớn
+      Parse/Chunk/Embedding chạy đồng bộ
+      Nguyên nhân: Tác vụ CPU-bound nghẽn luồng Web API
+    Nhóm 3: Chấm bài & CI
+      Dồn ứ webhook sát deadline
+      Chạy test code tốn CPU/RAM
+      Nguyên nhân: Spike tài nguyên đột biến & Sandbox không giới hạn
+    Nhóm 4: Dashboard & DB
+      Query learning events thô
+      Quá tải database chính
+      Nguyên nhân: OLAP đè lên OLTP & Thiếu index/cache
+```
+
+### 2.1.1. Nhóm 1: Tải AI Inference & RAG Retrieval (Độ trễ và tần suất truy vấn)
+*   **Các bottleneck liên quan**: 
+    *   Nhiều sinh viên hỏi chatbot AI cùng lúc.
+    *   Truy vấn RAG retrieval tìm tài liệu tham khảo với tần suất cao.
+*   **Phân tích nguyên nhân**:
+    *   **LLM Latency**: Thời gian xử lý của các mô hình ngôn ngữ lớn (LLM) rất dài (thường mất 2 - 10 giây cho một câu trả lời hoàn chỉnh). Nếu gọi đồng bộ qua Web API thông thường, thread pool của API Gateway sẽ nhanh chóng bị cạn kiệt, dẫn đến timeout (504 Gateway Timeout).
+    *   **Vector Search Overhead**: RAG đòi hỏi hệ thống phải tính toán embedding câu hỏi của sinh viên và tìm kiếm vector tương đồng (ANN Search) trên Qdrant. Nếu lượng vector index lớn và không được lọc trước, Qdrant phải quét không gian tìm kiếm rộng, tiêu tốn rất nhiều CPU và tăng độ trễ truy vấn.
+
+### 2.1.2. Nhóm 2: Xử lý tài liệu học tập (Tác vụ CPU-bound nặng)
+*   **Các bottleneck liên quan**:
+    *   Giảng viên upload tài liệu học tập lớn (slide PDF, giáo trình trăm trang, ảnh tài liệu cần OCR).
+*   **Phân tích nguyên nhân**:
+    *   **Blocking Web API**: Các tác vụ đọc file PDF, trích xuất text (parsing), chia đoạn (chunking) và gửi dữ liệu qua API để sinh embedding vector là các tác vụ tiêu tốn nhiều CPU và thời gian (vài phút). Việc chạy trực tiếp và đồng bộ các tác vụ này trên API xử lý request của giảng viên sẽ làm đứng hoàn toàn luồng Web Backend.
+
+### 2.1.3. Nhóm 3: Chạy thử nghiệm code & Đánh giá tự động (Spike tài nguyên đột biến)
+*   **Các bottleneck liên quan**:
+    *   Giai đoạn sát deadline, hàng loạt sinh viên push code và kích hoạt autograding/CI.
+*   **Phân tích nguyên nhân**:
+    *   **Resource Spike**: Việc chấm code sinh viên bắt buộc phải chạy code đó trong một môi trường cô lập (Sandbox container) và chạy các unit/integration test. Mỗi sandbox pod khởi chạy tiêu thụ tài nguyên CPU/RAM nhất định. Khi hàng trăm webhook đẩy về cùng một lúc trước deadline, cụm Node vật lý sẽ bị quá tải tức thì, gây hiện tượng OOM (Out Of Memory) sập toàn cụm.
+    *   **Không kiểm soát sandbox**: Sinh viên có thể vô tình hoặc cố ý viết code chứa vòng lặp vô hạn, hoặc code chiếm dụng hết CPU/RAM của node nếu không có cấu hình giới hạn tài nguyên khắt khe.
+
+### 2.1.4. Nhóm 4: Dashboard & Cơ sở dữ liệu chính (OLAP đè lên OLTP)
+*   **Các bottleneck liên quan**:
+    *   Dashboard thống kê học tập (Learning Events) truy vấn lượng dữ liệu khổng lồ.
+    *   Cơ sở dữ liệu chính (PostgreSQL) và Vector DB bị quá tải do thiếu cache/index/filter.
+*   **Phân tích nguyên nhân**:
+    *   **Trùng chéo Workload**: Báo cáo dashboard của giảng viên cần thực hiện các câu lệnh thống kê phức tạp (`COUNT`, `SUM`, `GROUP BY`) trên hàng triệu dòng log sự kiện học tập (learning events). Chạy các query dạng phân tích (OLAP) này trực tiếp trên cơ sở dữ liệu giao dịch chính (OLTP PostgreSQL) sẽ gây khóa bảng, khóa dòng, kéo sụp hiệu năng của các tác vụ ghi thông thường như đăng nhập, nộp bài, lưu lịch sử chat.
+    *   **Thiếu tối ưu hóa truy vấn**: Các bảng dữ liệu lớn không được đánh chỉ mục (index) đúng cách, hoặc Vector DB không sử dụng các bộ lọc phân vùng để thu hẹp không gian tìm kiếm.
+
+---
+
+## 2.2. Giải pháp cho Nhóm 1: Tối ưu hóa Inference và RAG Retrieval
+
+Để giải quyết bài toán độ trễ phản hồi AI và giảm tải cho Vector DB, hệ thống áp dụng các giải pháp:
+
+1.  **Server-Sent Events (SSE) / Streaming Response**: Chuyển luồng giao tiếp chat sang dạng Stream. Trả kết quả theo từng từ (token) ngay khi LLM sinh ra. Điều này giảm thời gian chờ đợi cảm nhận của sinh viên xuống <100ms và giải phóng kết nối HTTP nhanh chóng, không block luồng xử lý của API Gateway.
+2.  **Semantic Caching (Redis)**: Sử dụng Redis làm bộ đệm ngữ nghĩa. Khi sinh viên hỏi một câu hỏi mới, AI Service chạy embedding câu hỏi đó và đối chiếu khoảng cách vector (Cosine Similarity) với các câu hỏi đã trả lời trước đó trong Redis. Nếu độ tương đồng >95% (ngưỡng tương đương), hệ thống trả về luôn câu trả lời đã cache mà không cần gọi LLM, tiết kiệm 90% chi phí và thời gian gọi LLM.
+3.  **Payload Filtering (Qdrant Filters)**: Lọc dữ liệu trước khi tìm kiếm vector. Backend bắt buộc phải truyền kèm `course_id` hoặc `lesson_id` làm bộ lọc. Qdrant chỉ thực hiện so khớp vector trên các phần dữ liệu thuộc môn học đó, giảm không gian tìm kiếm xuống 95%.
+4.  **Rate Limiting**: Áp dụng rate limit tại API Gateway (ví dụ: tối đa 10 câu hỏi/phút cho mỗi sinh viên) để tránh việc spam request phá hoại hệ thống.
+
+---
+
+## 2.3. Giải pháp cho Nhóm 2: Bất đồng bộ hóa luồng xử lý tài liệu
+
+Để tránh nghẽn luồng Web API khi giảng viên cập nhật tài liệu học tập:
+
+1.  **Mô hình Task Queue (Redis/RabbitMQ)**: Khi giảng viên upload file slide, CMS Service chỉ lưu file vật lý vào MinIO và đẩy một event (ví dụ: `document.uploaded`) vào hàng đợi Redis Queue/RabbitMQ, sau đó lập tức trả về mã phản hồi `202 Accepted` cho frontend. Giảng viên có thể tiếp tục thao tác khác mà không phải chờ đợi.
+2.  **RAG Worker chạy ngầm (Background Worker)**: Một worker chạy nền sẽ lấy task từ queue ra để xử lý parse, chunk, embedding ở luồng chạy ngầm. Khi hoàn thành, worker cập nhật trạng thái "Ready" lên PostgreSQL và gửi thông báo (web push notification) cho giảng viên. Luồng này giúp Web API chính luôn mượt mà.
+
+---
+
+## 2.4. Giải pháp cho Nhóm 3: Hàng đợi chấm bài và Sandbox cách ly
+
+Để bảo vệ hạ tầng K8s của trường không bị sập nguồn khi sinh viên nộp bài dồn dập:
+
+1.  **Hàng đợi chấm bài (Queue-based Webhook)**: Webhook push code gửi về từ GitHub sẽ không kích hoạt chạy test ngay lập tức mà được ghi nhận thành một task chấm bài trong hàng đợi Redis.
+2.  **Giới hạn Concurrent Workers**: Cấu hình số lượng CI Worker tối đa chạy đồng thời (ví dụ: tối đa 10 - 20 worker chạy song song tùy thuộc vào CPU/RAM còn trống của cụm Node vật lý). Các bài nộp còn lại sẽ nằm trong hàng đợi ở trạng thái `Pending`. Sinh viên có thể phải chờ 1 - 2 phút để nhận điểm, nhưng cụm K8s luôn hoạt động ổn định, không bị crash.
+3.  **Cách ly Sandbox bằng gVisor/sysbox**: Sử dụng các công nghệ container siêu nhẹ và an toàn để chạy code sinh viên, đồng thời giới hạn tài nguyên khắt khe cho mỗi sandbox pod (ví dụ: tối đa 0.5 CPU và 512MB RAM mỗi bài test) để ngăn chặn mã độc hoặc vòng lặp vô hạn của sinh viên phá hoại hệ thống.
+
+---
+
+## 2.5. Giải pháp cho Nhóm 4: Tách biệt dữ liệu phân tích (CQRS & Pre-aggregation)
+
+Để đảm bảo hiệu năng PostgreSQL giao dịch và tăng tốc dashboard:
+
+1.  **CQRS / Read Replica**: Sử dụng mô hình tách biệt luồng ghi và luồng đọc. PostgreSQL chính chỉ dùng để ghi log sự kiện. Các truy vấn báo cáo của Dashboard sẽ được hướng sang một **Read Replica** (bản sao chỉ đọc) của PostgreSQL để tránh ảnh hưởng đến Master DB.
+2.  **Pre-aggregation (Tính toán tổng hợp trước)**: Thay vì tính toán trực tiếp trên dữ liệu thô mỗi khi giảng viên tải trang dashboard, hệ thống chạy các job định kỳ (CronJob nửa tiếng một lần) để tổng hợp sẵn dữ liệu (ví dụ: số bài nộp thành công của lớp, điểm trung bình theo tuần) vào các bảng tổng hợp (Summary Tables). Trang dashboard chỉ việc SELECT từ bảng Summary này với độ trễ <10ms.
+3.  **TimescaleDB / ClickHouse**: Ở mốc tải lớn hơn, chuyển các learning events sang một database chuyên dụng cho Time-Series hoặc phân tích (như ClickHouse) để tối ưu hiệu năng truy vấn báo cáo.
+
+---
+
+## 2.6. Tóm tắt cơ chế giảm tải kiến nghị
+
+| Nhóm Bottleneck | Cơ chế giảm tải đề xuất | Công nghệ sử dụng | Hiệu quả mang lại |
+| :--- | :--- | :--- | :--- |
+| **Tải AI & RAG (Nhóm 1)** | Streaming Response + Semantic Cache | Redis (Vector Search) + SSE | Giảm perceived latency <100ms, tiết kiệm 90% chi phí gọi LLM API. |
+| **RAG Queries (Nhóm 1)** | Payload Pre-filtering | Qdrant filters | Giới hạn không gian tìm kiếm vector theo môn học, tăng tốc độ retrieve. |
+| **Parsing & Chunking (Nhóm 2)** | Task Queue & Background Workers | Redis Queue / RabbitMQ | Tránh nghẽn Web API, đảm bảo trải nghiệm upload tài liệu mượt mà. |
+| **Autograding (CI) (Nhóm 3)** | Hàng đợi chấm bài + Giới hạn Concurrent Pods | K8s Job + gVisor/sysbox | Bảo vệ cụm K8s khỏi sập nguồn do quá tải CPU/RAM, cô lập mã nguồn sinh viên an toàn. |
+| **Dashboard Analytics (Nhóm 4)** | Read Replica + Bảng tổng hợp trước | PostgreSQL Replica / Summary Tables | Tránh khóa bảng DB chính, load biểu đồ dashboard gần như ngay lập tức. |
+| **File Storage (Tất cả)** | Object Storage thay vì Local Disk | MinIO Tenant | Giải phóng bộ nhớ đĩa cục bộ, cho phép scale ngang backend dễ dàng (stateless). |
