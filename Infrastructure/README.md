@@ -222,19 +222,174 @@ Cấu hình tối thiểu đề xuất cho **mỗi node máy chủ vật lý** t
 *   **Mạng**: Kết nối mạng nội bộ tối thiểu **10GbE** (khuyến nghị) hoặc 2.5GbE để đồng bộ dữ liệu Longhorn/MinIO nhanh chóng.
 
 ---
+## 1.3. Gitea Self-host vs GitHub API: Tích hợp Git cho sinh viên
 
-#### 1.2.3.8. Tóm tắt giải pháp lựa chọn
+Khi xây dựng hệ thống AI Teaching Assistant, nhóm có hai hướng chính để quản lý mã nguồn bài nộp của sinh viên: **tự host Gitea** hoặc **tận dụng GitHub API/Webhook**. Về bản chất, phần Git chỉ đảm nhiệm lưu trữ repository và phát sinh sự kiện khi sinh viên nộp bài; các phần nặng như CI/autograding, AI review, sandbox, kiểm tra similarity và lưu kết quả vẫn do hệ thống Kubernetes của trường tự xử lý.
 
-| Thành phần | Giải pháp đề xuất | Lý do cốt lõi |
-| :--- | :--- | :--- |
-| **File Storage** | MinIO Operator + Tenant | Chuẩn S3-compatible, chia sẻ đa node dễ dàng (RWX), Erasure Coding tự bảo vệ dữ liệu. |
-| **PostgreSQL** | CloudNativePG Operator | Kubernetes-native, tự động hóa HA (failover < 1 phút), tích hợp sẵn backup/WAL archive lên MinIO. |
-| **Redis** | Redis Sentinel | Tốc độ RAM cực nhanh, HA đơn giản với Master/Replica/Sentinel, giảm tải tối đa cho DB chính. |
-| **Vector DB** | Qdrant trên Local PV/NVMe | Kiến trúc nhẹ hơn Milvus, tối ưu độ trễ tìm kiếm vector (<10ms) nhờ truy xuất đĩa NVMe cục bộ. |
-| **Block Storage phụ** | Longhorn CSI | Cấp đĩa ảo có nhân bản nhanh chóng cho các workload phụ (Monitoring, Dev/Staging). |
-| **Offsite Backup** | Cloudflare R2 / S3 Cloud | Phòng ngừa thảm họa mất toàn bộ cụm máy chủ của trường, tối ưu chi phí lưu trữ dài hạn. |
+### 1.3.1. So sánh ngắn gọn
+
+| Tiêu chí | Gitea Self-host | GitHub API / Webhook |
+|---|---|---|
+| Mô hình | Trường tự triển khai Git server trên hạ tầng riêng | Tận dụng hạ tầng GitHub để lưu repository |
+| Chi phí Git hosting | Tốn server, storage, backup, monitoring, vận hành | Gần như không phải vận hành hạ tầng Git |
+| Portfolio sinh viên | Hạn chế nếu repo nội bộ | Rất tốt, sinh viên có GitHub repo để đưa vào CV |
+| Tích hợp hệ thống | Có webhook/API, chủ động cao | Có webhook/API đầy đủ, dễ tích hợp với backend |
+| Kiểm soát dữ liệu | Cao, phù hợp bài thi/bài private | Phụ thuộc GitHub, repo public cần cân nhắc dữ liệu |
+| Vận hành | Cần tự backup, cập nhật, bảo mật, scale disk | GitHub xử lý uptime, storage, băng thông Git |
+| Phù hợp với PBL | Dùng được nhưng ít giá trị portfolio | Rất phù hợp với project-based learning |
+| Rủi ro sao chép | Thấp hơn nếu dùng private repo | Cao hơn nếu public, nhưng có thể kiểm soát bằng demo, commit history, similarity check và vấn đáp |
 
 ---
 
-**Tham chiếu:** MinIO hỗ trợ triển khai trên Kubernetes bằng operator và dùng erasure coding cho distributed storage; CloudNativePG là operator quản lý PostgreSQL HA với primary/standby và automated failover; Qdrant là vector database/vector search engine có API production-ready; Longhorn là distributed block storage cho Kubernetes và hỗ trợ snapshot/backup.
+### 1.3.2. Lý do chọn GitHub API/Webhook
 
+Nhóm đề xuất chọn **GitHub API/Webhook** làm phương án chính vì phù hợp hơn với định hướng **“đứng trên vai người khổng lồ”**: tận dụng hạ tầng GitHub thay vì tự xây và vận hành Git server.
+
+Thứ nhất, GitHub giúp giảm đáng kể chi phí và công sức vận hành. Nếu dùng Gitea, nhà trường phải tự lo server, dung lượng repository, backup, bảo mật, monitoring và xử lý sự cố. Với GitHub, phần Git hosting gần như được chuyển sang nền tảng có sẵn, còn hạ tầng Kubernetes của trường chỉ tập trung vào các thành phần cốt lõi như AI review, autograding, RAG, database và dashboard.
+
+Thứ hai, GitHub mang lại giá trị trực tiếp cho sinh viên. Các project public có thể trở thành portfolio thật khi sinh viên đi thực tập hoặc xin việc. Sinh viên cũng được làm quen với quy trình phát triển phần mềm phổ biến trong thực tế như commit, branch, Pull Request, issue và review.
+
+Thứ ba, GitHub Webhook giúp backend không cần polling liên tục. Khi sinh viên `push code` hoặc tạo Pull Request, GitHub sẽ gửi event về API Gateway của trường. Backend đưa event vào queue, worker nội bộ clone đúng commit, chạy test, AI review, kiểm tra similarity và lưu kết quả. Sau đó hệ thống chỉ gọi GitHub API để cập nhật trạng thái hoặc comment kết quả vào Pull Request.
+
+Luồng tổng quát:
+
+```txt
+Student push code / Pull Request
+        ↓
+GitHub Webhook
+        ↓
+API Gateway của trường
+        ↓
+Queue
+        ↓
+CI / AI Review Worker trong Kubernetes
+        ↓
+PostgreSQL / MinIO lưu kết quả
+        ↓
+GitHub API cập nhật status/comment
+````
+
+Thứ tư, trong project-based learning, việc sinh viên tham khảo hoặc tái sử dụng code không nhất thiết là xấu. Điều quan trọng là sinh viên có hiểu, tùy biến, tích hợp và bảo vệ được sản phẩm hay không. Vì vậy, GitHub public repo phù hợp với tinh thần học mở, đồng thời hệ thống vẫn có thể đánh giá công bằng thông qua commit history, demo, vấn đáp, kết quả CI và similarity check.
+
+### 1.3.3. Kết luận
+
+Phương án được chọn là:
+
+```txt
+GitHub API/Webhook làm Git hosting chính
+CI/autograding và AI review chạy trong Kubernetes của trường
+Gitea chỉ dùng làm phương án phụ cho bài thi, bài kiểm tra hoặc repo cần private tuyệt đối
+```
+
+Tóm lại, GitHub API giúp hệ thống giảm gánh nặng vận hành Git, tăng giá trị portfolio cho sinh viên và phù hợp hơn với mô hình project-based learning. Gitea vẫn có giá trị trong các trường hợp cần kiểm soát nội bộ tuyệt đối, nhưng không nên là lựa chọn chính nếu mục tiêu là mở rộng, tiết kiệm chi phí và tận dụng hạ tầng có sẵn.
+
+## 1.4. Sơ đồ triển khai hệ thống (Deployment Diagram)
+
+Dưới đây là sơ đồ triển khai toàn diện của hệ thống **AI Teaching Assistant Platform**, được phân bổ theo cụm Kubernetes nội bộ (On-premise 3-Node) kết hợp với các dịch vụ Cloud bổ trợ (Cloudflare, GitHub). Sơ đồ thể hiện cách các lớp (Layer 1 - Mạng, Layer 2 - Ứng dụng, Layer 3 - Dữ liệu) kết nối và vận hành thực tế.
+
+```mermaid
+graph TB
+    subgraph External_Zone["☁️ Tầng Đám Mây & Client (Cloud)"]
+        direction LR
+        Users["👥 Sinh viên / Giảng viên / Admin"]
+        GitHub["🐱 GitHub Cloud\n(Repos & Webhook Event)"]
+        R2["☁️ Cloudflare R2\n(Offsite Backups)"]
+    end
+
+    subgraph K8S_Cluster["☸️ Cụm Kubernetes (3 Node Vật Lý - LAN 10GbE)"]
+        
+        subgraph NS_Ingress["🌐 Namespace: ingress-system"]
+            Tunnel["🚇 Cloudflare Tunnel Pod\n(cloudflared)"]
+            Gateway["🚦 API Gateway Pod\n(Auth / Rate Limit / Routing)"]
+        end
+
+        subgraph NS_App["📦 Namespace: app-services"]
+            CMS["🖥️ CMS Service Pods\n(Scale ngang, xử lý CRUD)"]
+            AI["🧠 AI Service Pods\n(Scale ngang, RAG queries)"]
+            CI_Worker["⚙️ CI/Autograding Worker Pods\n(Nhận event, clone repo, chấm bài, check plagiarism)"]
+        end
+
+        subgraph NS_Data["🐘 Namespace: database-storage"]
+            subgraph PG_Cluster["PostgreSQL HA (CloudNativePG)"]
+                PG_P["🐘 Postgres Primary"]
+                PG_R1["🐘 Postgres Replica 1"]
+                PG_R2["🐘 Postgres Replica 2"]
+            end
+            
+            subgraph Redis_Cluster["Redis HA (Sentinel)"]
+                Redis_M["⚡ Redis Master"]
+                Redis_R["⚡ Redis Replicas"]
+            end
+
+            Qdrant["🔍 Qdrant StatefulSet\n(Vector DB)"]
+            
+            subgraph MinIO_Tenant["MinIO Tenant (Object Storage)"]
+                MinIO_Pods["☁️ MinIO Distributed Pods"]
+            end
+        end
+
+        subgraph Storage_CSI["💾 Storage CSI & Classes"]
+            SC_NVMe["⚡ StorageClass: local-nvme\n(NVMe SSD local trên Node)"]
+            SC_HDD["💿 StorageClass: local-hdd-object\n(HDD local trên Node)"]
+            SC_Longhorn["🛡️ StorageClass: longhorn-replicated\n(Replicated Block Storage)"]
+        end
+    end
+
+    %% External & Ingress connections
+    Users -->|HTTPS| Tunnel
+    GitHub -->|Webhooks| Tunnel
+    Tunnel --> Gateway
+
+    %% Gateway Routing
+    Gateway -->|HTTP / REST| CMS
+    Gateway -->|HTTP / REST / WS| AI
+
+    %% App to Data/Storage connections
+    CMS -->|Metadata / Auth| PG_P
+    CMS -->|Assets / Slide / Uploads| MinIO_Pods
+    AI -->|Semantic Queries| Qdrant
+    CMS & AI & CI_Worker -->|Cache / Rate Limit / Queues| Redis_M
+    CI_Worker -->|Autograding Logs / Code Zip| MinIO_Pods
+    CI_Worker -->|Save Grades & Plagiarism Status| PG_P
+
+    %% CI Webhook & API loop
+    GitHub -.->|1. Sends Webhook Event| Tunnel
+    CI_Worker -.->|2. Anonymously git clone| GitHub
+    CI_Worker -.->|3. Update Commit Status / PR Comment| GitHub
+
+    %% Storage Mounts (PVC)
+    PG_P & PG_R1 & PG_R2 -.->|PVC| SC_NVMe
+    Qdrant -.->|PVC| SC_NVMe
+    MinIO_Pods -.->|PVC| SC_HDD
+    Redis_M & Redis_R -.->|PVC| SC_Longhorn
+
+    %% Backup Flows
+    PG_P -->|Automated WAL/Backup| MinIO_Pods
+    Qdrant -->|Automated Snapshot| MinIO_Pods
+    MinIO_Pods -->|Sync ngoại biên| R2
+```
+
+---
+
+### 1.4.1. Giải thích luồng hoạt động chính (Workflow)
+
+#### 1. Luồng Người Dùng & Quản Trị (Admins/Tutors/Students)
+*   Người dùng truy cập qua Domain của trường -> được bảo vệ bởi **Cloudflare (DNS/SSL/DDoS)**.
+*   Request đi qua **Cloudflare Tunnel (cloudflared)** được mã hóa an toàn đến cụm K8s nội bộ mà không cần mở port public trên router của trường.
+*   **API Gateway** tiếp nhận request, thực hiện xác thực (JWT Auth), kiểm soát tần suất (Rate Limiting) và điều phối traffic đến đúng service tương ứng: nghiệp vụ quản lý (**CMS Service**) hoặc tính năng trợ lý học tập (**AI Service**).
+
+#### 2. Luồng Nộp Bài & Tự Động Chấm Điểm (Autograding & Plagiarism Workflow)
+1.  Sinh viên thực hiện `git push` bài làm hoặc tạo Pull Request trên GitHub.
+2.  **GitHub Cloud** gửi sự kiện (Webhook) chứa thông tin commit về API Gateway thông qua Cloudflare Tunnel.
+3.  API Gateway đẩy task chấm bài vào hàng đợi trong **Redis Sentinel (Queue)**.
+4.  **CI/Autograding Worker** nhận task, thực hiện clone mã nguồn public từ GitHub cá nhân của sinh viên về thư mục tạm trong pod mà không cần xác thực token.
+5.  Worker chạy các bước:
+    *   **Autograding**: Build code, chạy các unit test / integration test để tính điểm logic.
+    *   **Anti-Plagiarism**: Gọi công cụ MOSS/JPlag quét đối chiếu độ trùng lặp với cơ sở dữ liệu các bài nộp cùng kỳ để phát hiện đạo văn.
+6.  Worker lưu trữ báo cáo log chi tiết và mã nguồn dạng nén (`.zip`) vào **MinIO Object Storage**, đồng thời lưu kết quả điểm số/trạng thái đạo văn vào **PostgreSQL HA**.
+7.  Worker gọi **GitHub API** (sử dụng PAT của hệ thống) để ghi kết quả (Pass/Fail) vào Commit Status hoặc bình luận nhận xét chi tiết vào Pull Request của sinh viên.
+
+#### 3. Luồng Quản Lý Tài Liệu & Phản Hồi RAG (AI Query Workflow)
+*   Khi Giảng viên upload slide/giáo trình mới trên **Tutor site**, **CMS Service** đẩy file vật lý vào **MinIO** và lưu metadata vào **PostgreSQL**.
+*   Một tiến trình background trigger **AI Service** lấy tài liệu từ MinIO, thực hiện bẻ nhỏ (chunking), chạy mô hình sinh vector (Embedding) và lưu index vào **Qdrant Vector Database**.
+*   Khi sinh viên hỏi đáp với chatbot AI trên **User site**, **AI Service** nhận câu hỏi, truy vấn ngữ nghĩa (ANN Search) đến **Qdrant** để lấy các đoạn tài liệu liên quan nhất, sau đó kết hợp với ngữ cảnh gửi đến mô hình ngôn ngữ lớn (LLM) để sinh câu trả lời chính xác, tránh hiện tượng ảo tưởng (hallucination).
