@@ -1,655 +1,139 @@
-# 1. Tìm hiểu Ops và cách chia cluster
-Do hệ thống thiên về AI nên tải sẽ không đều. Web/API có thể scale ngang, nhưng database, vector database, object storage và queue phải được thiết kế ổn định hơn. Tim hiểu cách chia cluster thành các lớp:
-- Edge layer: load balancer, reverse proxy, rate limiting.
-- Web/API layer: scale ngang nhiều replica.
-- AI worker layer: xử lý LLM, tutor, guardrails.
-- RAG worker layer: parse tài liệu, embedding, indexing.
-- Data layer: PostgreSQL, vector DB, object storage, Redis/queue.
-- CI/autograding layer: tách riêng để việc chạy test code sinh viên không ảnh hưởng hệ thống chính.
-- Monitoring layer: log, metrics, tracing, alert.
+# Tóm tắt kiến trúc Demo, Prod và Bottleneck
 
-Mục tiêu là xác định service nào cần scale ngang, service nào cần chạy ổn định/high availability, service nào nên xử lý bất đồng bộ qua queue.
+## 1. Bản Demo
 
-## 1.1. Context
-- Giả định hệ thống chạy trên server, chỉ giới hạn cho sinh viên trong trường sử dụng.
-- Ứng tính quy mô:
-    - Khi cao điểm có thể có khoảng 1000 user active, 50-100 req/s.
-    - Database: khoảng vài chục GB, chủ yếu là tài liệu, embedding và user info.
-    - Trước mắt triển khai trên 3 môn học pivot là Học máy, Học sâu và Khai phá dữ liệu lớn.
-- Dự tính triển khai chính trên Kubernetes vì khả năng co giãn và quản lý tài nguyên tốt.
+Bản Demo ưu tiên triển khai nhanh, tiết kiệm chi phí và chứng minh được các luồng chính của hệ thống. Hướng phù hợp là **hybrid/free-first**, tức là tận dụng tài nguyên free/managed service có sẵn, chỉ tự chạy các thành phần cần custom logic.
 
-## 1.2. Kiến trúc hệ thống
-### 1.2.1. Layer 1: Tầng mạng
-```mermaid
-graph TB
-    Internet(["🌐 Internet\n(Users / Clients)"])
+### 1.1. Thành phần và công nghệ Demo
 
-    subgraph CF["☁️ Cloudflare"]
-        direction TB
-        DNS["🔗 Domain (DNS)"]
-        SSL["🔒 SSL/TLS Termination"]
-        DDOS["🛡️ DDoS Protection"]
-        CDN["⚡ CDN / Edge Cache"]
-        Tunnel["🚇 Cloudflare Tunnel\n(cloudflared)"]
+| Thành phần     | Công nghệ đề xuất                                             | Ghi chú                                                     |
+| -------------- | ------------------------------------------------------------- | ----------------------------------------------------------- |
+| Frontend       | Vercel, Cloudflare Pages, Netlify hoặc Nginx container        | Gồm 3 site: Admin, User/Sinh viên, Tutor                    |
+| Backend/API    | 1 backend service trên VPS, Render/Railway/Fly.io hoặc Docker | Xử lý nghiệp vụ chính: course, project, progress, dashboard |
+| Database       | Supabase Postgres hoặc PostgreSQL local                       | Demo nên ưu tiên Supabase để giảm vận hành                  |
+| Object Storage | Cloudflare R2, Supabase Storage hoặc MinIO local              | Lưu slide, giáo trình, project spec, bài nộp                |
+| Vector DB      | Qdrant Cloud, Supabase pgvector hoặc Qdrant local             | Lưu embedding phục vụ RAG                                   |
+| Cache/Queue    | Upstash Redis hoặc Redis local                                | Cache, queue nhẹ cho RAG/job                                |
+| AI/LLM         | OpenAI/Gemini/Claude API hoặc model API ngoài                 | Không cần GPU nếu gọi API ngoài                             |
+| RAG Worker     | Service tự build                                              | Parse tài liệu, chunking, embedding, indexing               |
+| Git Repository | Gitea nhỏ hoặc GitHub/Gitea cloud tạm thời                    | Demo có thể dùng tạm, Prod ưu tiên Gitea self-host          |
+| CI/Autograding | Mock worker, Jenkins nhỏ, Gitea Actions hoặc GitHub Actions   | Chỉ cần chứng minh luồng nộp bài → nhận feedback            |
+| Monitoring     | Provider logs, Docker logs, Sentry free tier, Portainer       | Chưa cần full monitoring stack                              |
 
-        DNS --> SSL --> DDOS --> CDN --> Tunnel
-    end
+### 1.2. Yêu cầu phần cứng Demo
 
-    subgraph K8S["☸️ Kubernetes Cluster"]
-        direction TB
+Nếu dùng managed service như Supabase, R2, Qdrant Cloud, Upstash:
 
-        subgraph GW["API Gateway (K8s Service - ClusterIP)"]
-            RATE["🚦 Rate Limiting"]
-            AUTH["🔑 Auth / Routing"]
-        end
+| Hạng mục          | Đề xuất                                 |
+| ----------------- | --------------------------------------- |
+| Số server tự quản | 0–1 server                              |
+| CPU               | 2–4 vCPU                                |
+| RAM               | 4–8 GB                                  |
+| Disk              | 50–100 GB SSD                           |
+| Network           | 1 Gbps hoặc cloud network mặc định      |
+| GPU               | Không cần                               |
+| Phù hợp           | 30–50 user đồng thời, 1–2 môn học pilot |
 
-        subgraph PODS["Microservices"]
-            P1["📦 Service A"]
-            P2["📦 Service B"]
-            P3["📦 Service N"]
-        end
+Nếu muốn chạy toàn bộ bằng Docker Compose local:
 
-        RATE --> AUTH
-        AUTH --> P1 & P2 & P3
-    end
+| Hạng mục |  Tối thiểu | Khuyến nghị |
+| -------- | ---------: | ----------: |
+| CPU      |     4 vCPU |      8 vCPU |
+| RAM      |       8 GB |       16 GB |
+| Disk     | 200 GB SSD |  500 GB SSD |
+| GPU      |  Không cần |   Không cần |
 
-    Internet --> CF
-    Tunnel -->|"Encrypted Tunnel\n(trỏ thẳng vào ClusterIP)"| RATE
+### 1.3. Kết luận Demo
 
-```
-
-### 1.2.2. Layer 2: Tầng ứng dụng
-
-#### Phía Frontend
-Chia làm 3 site độc lập ứng với 3 vai trò (role):
-*   **Admin**: Quản trị hệ thống, quản lý môn học, người dùng, phân phối bài tập (assignments),...
-*   **User**: Học sinh, sinh viên tham gia học tập và tương tác với AI.
-*   **Tutor**: Giảng viên, trợ giảng quản lý lớp học, chấm điểm và cấu hình trợ lý ảo cho môn học.
-
-#### Phía Backend (So sánh phương án phân chia)
-
-| Tiêu chí | **Chia theo Role** (admin-be / tutor-be / user-be) | **Chia theo Tính năng** (CMS Service / AI Service) |
-| :--- | :--- | :--- |
-| **Nguyên tắc phân chia** | Dựa trên **đối tượng sử dụng** | Dựa trên **domain nghiệp vụ** |
-| **Độc lập deploy** | ✅ Deploy riêng từng role | ✅ Deploy riêng từng tính năng |
-| **Khả năng Scale** | ⚠️ Scale theo role → dễ dư thừa tài nguyên nếu user-be vừa xử lý nghiệp vụ thông thường vừa tải AI nặng | ✅ Scale AI Service độc lập khi nhu cầu tính toán AI/Vector Search tăng cao |
-| **Tái sử dụng logic** | ❌ Logic nghiệp vụ bị trùng lặp nhiều giữa các role (ví dụ: xem khóa học có ở cả tutor & user) | ✅ Logic tập trung theo domain, tái sử dụng cao, tránh lặp mã nguồn |
-| **Phân quyền (AuthZ)** | ✅ Rõ ràng theo role ngay từ tầng service | ⚠️ Cần xử lý phân quyền tập trung tại API Gateway hoặc phân rã logic trong service |
-| **Độ phức tạp** | ⚠️ Nhiều service nhỏ nhưng logic bên trong mỗi service đơn giản hơn | ✅ Ít service hơn, nhưng mỗi service gộp nhiều vai trò nên cần thiết kế module tốt |
-| **Phù hợp với team nhỏ** | ❌ Phải duy trì và vận hành 3 repository/pipeline riêng biệt | ✅ Chỉ cần vận hành
-
-### 1.2.3. Layer 3: Tầng dữ liệu (Database & Storage)
-
-Ở mốc triển khai 5 năm, hệ thống được thiết kế theo hướng **tự host trên cụm Kubernetes (On-premise)**. Mỗi loại dữ liệu với đặc tính riêng sẽ được lưu trữ bởi các giải pháp chuyên dụng:
-
-*   **File Storage (Tài liệu, slide, bài nộp)**: Cần dung lượng lớn, hỗ trợ chia sẻ đa node.
-*   **PostgreSQL**: Cần tính nhất quán cao, hỗ trợ HA, backup và khôi phục tự động.
-*   **Redis**: Cần tốc độ cực cao để lưu cache/session/rate limit tạm thời.
-*   **Vector Database**: Cần độ trễ cực thấp và I/O đĩa cực lớn để phục vụ tìm kiếm ngữ nghĩa RAG.
-
-```mermaid
-graph TD
-    subgraph Clients["Tầng Ứng Dụng (K8s Pods)"]
-        CMS["📦 CMS Service"]
-        AI["📦 AI Service"]
-        Mon["📊 Monitoring Stack"]
-    end
-
-    subgraph StorageClasses["Tầng Lưu Trữ (Storage Classes)"]
-        classDef classLocal fill:#f9f,stroke:#333,stroke-width:2px;
-        classDef classNet fill:#bbf,stroke:#333,stroke-width:2px;
-
-        L_NVMe["💾 local-nvme\n(NVMe SSD cục bộ)"]:::classLocal
-        L_HDD["💾 local-hdd-object\n(HDD Enterprise)"]:::classLocal
-        L_Rep["💾 longhorn-replicated\n(Replicated Block Network)"]:::classNet
-    end
-
-    subgraph Systems["Hệ thống lưu trữ"]
-        MinIO["☁️ MinIO Tenant\n(Object - RWX)"]
-        PG["🐘 CloudNativePG\n(Postgres HA - RWO)"]
-        Redis["⚡ Redis Sentinel\n(Cache/Session)"]
-        Qdrant["🔍 Qdrant StatefulSet\n(Vector DB - RWO)"]
-        Longhorn["🛡️ Longhorn CSI\n(Workloads phụ)"]
-    end
-
-    subgraph Offsite["Lưu trữ ngoại biên"]
-        R2["☁️ Cloudflare R2 / S3"]
-    end
-
-    CMS -->|Metadata / Transactions| PG
-    CMS -->|Tài liệu / Slide / Assets| MinIO
-    CMS & AI -->|Cache / Sessions| Redis
-    AI -->|ANN Semantic Search| Qdrant
-    Mon -->|Metrics / Logs| Longhorn
-
-    PG -.->|PVC| L_NVMe
-    Qdrant -.->|PVC| L_NVMe
-    MinIO -.->|PVC| L_HDD
-    Redis -.->|PVC| L_Rep
-    Longhorn -.->|PVC| L_Rep
-
-    %% Backup Flows
-    PG -->|Backup / WAL| MinIO
-    Qdrant -->|Snapshot| MinIO
-    MinIO -->|Sync dữ liệu quan trọng| R2
-```
+Bản Demo nên ưu tiên **cloud-first** để giảm công vận hành. Nhóm chỉ cần tập trung build frontend, backend, AI workflow và RAG pipeline. Tuy nhiên, vẫn nên chuẩn bị **Docker Compose local fallback** để có thể chạy offline hoặc thay thế khi free tier gặp giới hạn.
 
 ---
 
-#### 1.2.3.1. File Storage (MinIO)
+## 2. Bản Prod
 
-*   **Giải pháp chọn**: **MinIO Operator + Distributed MinIO Tenant** (tương thích S3 API).
-*   **Thiết kế lưu trữ**: Backend không ghi file lên ổ đĩa cục bộ mà lưu metadata vào PostgreSQL và đẩy file vật lý sang MinIO.
-*   **Lý do chọn & Điểm nổi bật**:
-    *   Hỗ trợ truy cập đa node (**ReadWriteMany - RWX**) qua HTTP API, giúp Backend pod scale ngang thoải mái.
-    *   Cơ chế **Erasure Coding** phân tán dữ liệu trên nhiều đĩa/máy chủ giúp tự phục hồi khi hỏng đĩa hoặc sập node.
-    *   Dễ dàng chuyển đổi sang các dịch vụ S3 Cloud (Cloudflare R2, AWS S3) sau này mà không cần sửa code.
-    *   Làm kho lưu trữ tập trung cho các bản backup PostgreSQL và snapshot của Vector Database.
-*   **Cấu hình dự kiến**:
-    *   *Dung lượng*: 3 – 6 TB raw (slide, bài nộp, logs, backups).
-    *   *Mô hình*: Distributed chạy trên 3 node vật lý.
-    *   *Cấu hình mỗi node*: 1 – 2 × HDD Enterprise 8 TB (sử dụng StorageClass `local-hdd-object`).
+Bản Prod hướng tới triển khai ổn định trên Kubernetes, có khả năng mở rộng, kiểm soát dữ liệu nội bộ và tách riêng các workload nặng như AI/RAG, database, Git và CI/autograding.
 
----
+### 2.1. Thành phần và công nghệ Prod
 
-#### 1.2.3.2. PostgreSQL (CloudNativePG)
+| Thành phần            | Công nghệ đề xuất                                                  | Ghi chú                                         |
+| --------------------- | ------------------------------------------------------------------ | ----------------------------------------------- |
+| Frontend              | 3 site riêng: Admin, User/Sinh viên, Tutor                         | Deploy độc lập, scale riêng                     |
+| Backend/API           | Modular services hoặc microservices trên Kubernetes                | Stateless, scale ngang bằng replica/HPA         |
+| API Gateway / Ingress | Cloudflare, Cloudflare Tunnel, Ingress Controller hoặc Gateway API | TLS, routing, rate limit                        |
+| AI/Tutor Service      | Tutor orchestration, prompt workflow, guardrails                   | Tách khỏi API chính                             |
+| RAG Pipeline          | Parser, chunker, embedding worker, indexing worker                 | Xử lý async qua queue                           |
+| Database              | PostgreSQL HA bằng CloudNativePG                                   | Dữ liệu user, course, project, progress, rubric |
+| Vector DB             | Qdrant self-host                                                   | Nên dùng NVMe cho tốc độ truy vấn               |
+| Object Storage        | MinIO distributed                                                  | Lưu tài liệu, bài nộp, artifact, backup         |
+| Cache/Queue           | Redis Sentinel/Redis Cluster hoặc queue chuyên dụng                | Cache, session, job queue                       |
+| Git Repository        | Gitea self-host                                                    | Quản lý repo, PR, issue, webhook                |
+| CI/Autograding        | Jenkins độc lập, Gitea Actions Runner hoặc worker riêng            | Chạy trên node riêng, sandbox cách ly           |
+| Monitoring            | Prometheus, Grafana, Loki, Tempo, Alertmanager                     | Metrics, logs, tracing, alert                   |
+| Storage               | Local NVMe, MinIO, Longhorn cho workload phụ                       | Data nóng nên ưu tiên NVMe                      |
 
-*   **Giải pháp chọn**: **CloudNativePG Operator** (1 Primary + 2 Replicas).
-*   **Lý do chọn & Điểm nổi bật**:
-    *   Quản lý PostgreSQL chuẩn Cloud-Native: tự động hóa replication, phát hiện và failover node Primary lỗi trong <1 phút.
-    *   Tự động backup dữ liệu và WAL (Write-Ahead Logging) trực tiếp lên cụm MinIO nội bộ, hỗ trợ Point-in-Time Recovery (PITR).
-    *   *Tại sao không dùng Longhorn làm chính cho PostgreSQL?* PostgreSQL production cần HA và phục hồi ở tầng database (do CloudNativePG quản lý) thay vì chỉ nhân bản vật lý thô ở tầng block storage (Longhorn). Longhorn chỉ dùng cho đĩa phụ của các workload không nhạy cảm độ trễ.
-*   **Cấu hình dự kiến**:
-    *   *Dung lượng dữ liệu*: 100 – 300 GB.
-    *   *Tài nguyên/Pod*: 2 – 4 core CPU, 4 – 8 GB RAM (Limit: 8 – 16 GB RAM).
-    *   *Lưu trữ*: PVC 300 – 500 GB cho mỗi instance sử dụng StorageClass `local-nvme` (đĩa NVMe SSD vật lý gắn trực tiếp trên node máy chủ để tối đa hóa IOPS).
+### 2.2. Các mức cluster Prod
 
----
+| Mức triển khai   |  Số node | Phù hợp                                             |
+| ---------------- | -------: | --------------------------------------------------- |
+| Prod tối thiểu   |   3 node | Pilot production, tải vừa, workload còn trộn nhiều  |
+| Prod nhỏ         |   5 node | Một vài lớp/môn học, đã tách app/data/worker cơ bản |
+| Prod khuyến nghị | 7–9 node | Mục tiêu khoảng 1000 user đồng thời                 |
+| Prod mở rộng     | 10+ node | Nhiều môn/khoa, tải lớn dài hạn                     |
 
-#### 1.2.3.3. Redis (Sentinel / Cluster)
+### 2.3. Cấu hình Prod khuyến nghị
 
-*   **Giải pháp chọn**: **Redis Sentinel** (1 Master + 2 Replicas + 3 Sentinels) đảm bảo HA ở quy mô vừa phải.
-*   **Lý do chọn**: Tốc độ truy xuất mili-giây trên RAM để lưu session, refresh token, rate limit và cache kết quả SQL thường truy vấn, giảm tải tối đa cho PostgreSQL.
-*   **Cấu hình dự kiến**:
-    *   *Tài nguyên/Pod*: 500m – 1 core CPU, 2 – 4 GB RAM.
-    *   *Lưu trữ*: 20 – 50 GB PVC dùng StorageClass `longhorn-replicated` hoặc `local-ssd` (bật AOF/RDB persistence). Dữ liệu chỉ mang tính chất cache/session, dữ liệu gốc luôn nằm ở PostgreSQL.
+| Nhóm node           | Số node | Vai trò                                                    | Cấu hình gợi ý                              |
+| ------------------- | ------: | ---------------------------------------------------------- | ------------------------------------------- |
+| Control-plane/Infra |       3 | Kubernetes control-plane, ingress, system service nhẹ      | 4–8 core, 16–32 GB RAM                      |
+| App node            |       2 | Frontend, backend API, auth, course service, dashboard API | 8–16 core, 32–64 GB RAM                     |
+| Data node           |       3 | PostgreSQL HA, Qdrant, Redis, MinIO                        | 16 core, 64–128 GB RAM, NVMe + HDD/SSD data |
+| Worker/CI node      |     1–2 | AI/RAG worker, Jenkins/Gitea runner, sandbox               | 16–32 core, 64–128 GB RAM                   |
 
----
+### 2.4. Storage Prod
 
-#### 1.2.3.4. Vector Database (Qdrant)
+| Loại dữ liệu          | Nên dùng                                      | Lý do                                  |
+| --------------------- | --------------------------------------------- | -------------------------------------- |
+| PostgreSQL            | Local NVMe + CloudNativePG backup/replication | Cần IOPS cao                           |
+| Qdrant/vector DB      | Local NVMe                                    | Truy vấn vector và indexing cần tốc độ |
+| File/tài liệu/bài nộp | MinIO distributed                             | Dễ mở rộng, phù hợp object lớn         |
+| Gitea repositories    | SSD/NVMe riêng                                | Tránh chung với CI artifact            |
+| CI artifact/log       | MinIO hoặc object storage riêng               | Không làm phình Git repo               |
+| Monitoring data       | Longhorn hoặc storage bền vững riêng          | Có retention policy                    |
+| Backup                | Offsite/S3-compatible storage                 | Phục hồi khi có sự cố                  |
 
-*   **Giải pháp chọn**: **Qdrant StatefulSet** chạy trên **Local PV/NVMe**.
-*   **Lý do chọn & Điểm nổi bật**:
-    *   Đơn giản và nhẹ hơn rất nhiều so với Milvus (không cần các thành phần phụ trợ phức tạp như message queue, metadata store), phù hợp với đội vận hành nhỏ.
-    *   *Tại sao dùng Local PV/NVMe?* Tìm kiếm vector (ANN Search) yêu cầu độ trễ cực thấp và I/O đĩa rất lớn. Đặt Vector DB trên network block storage (như Longhorn) qua mạng LAN 1Gbps sẽ gây nghẽn băng thông nghiêm trọng. Qdrant bắt buộc phải truy xuất trực tiếp ổ đĩa NVMe cục bộ để đạt hiệu năng tối ưu.
-*   **Cấu hình dự kiến**:
-    *   *Dung lượng index*: 50 – 150 GB (khoảng 5.000.000 vectors).
-    *   *Tài nguyên/Pod*: 2 – 4 core CPU, 4 – 8 GB RAM (Limit: 16 – 32 GB RAM để Qdrant load cache index vào RAM).
-    *   *Lưu trữ*: PVC 500 GB – 1 TB dùng StorageClass `local-nvme` (Enterprise NVMe SSD gắn trực tiếp).
-    *   *Backup*: Snapshot định kỳ và tự động upload lên MinIO.
+### 2.5. Kết luận Prod
 
----
-
-#### 1.2.3.5. Block Storage phụ (Longhorn)
-
-*   **Giải pháp chọn**: **Longhorn CSI**.
-*   **Mục đích sử dụng**: Cấp PVC có nhân bản (replication) cho các workload phụ, không nhạy cảm độ trễ I/O (Monitoring stack Prometheus/Grafana, Dev/Staging DBs, Dashboard metadata). Tuyệt đối **không dùng** Longhorn cho đĩa dữ liệu của MinIO, PostgreSQL chính và Qdrant production.
-*   **Cấu hình**: Chế độ Replication = 2 hoặc 3 tùy số node vật lý, sử dụng StorageClass `longhorn-replicated`.
+Cụm 3 node chỉ nên xem là mức tối thiểu hoặc pilot production. Nếu mục tiêu là khoảng 1000 user đồng thời, nên hướng tới 7–9 node trở lên để tách rõ app, data, AI/RAG worker, CI/autograding và monitoring. Đặc biệt, không nên để CI/autograding hoặc RAG worker chạy chung với database node.
 
 ---
 
-#### 1.2.3.6. Chiến lược Backup và Khôi phục
-
-Quy trình backup đa tầng tự động đảm bảo khả năng khôi phục nhanh khi xảy ra thảm họa phần cứng:
-
-1.  **PostgreSQL**: CloudNativePG tự động backup hàng ngày + lưu trữ WAL archive liên tục lên cụm MinIO nội bộ.
-2.  **Vector DB**: Qdrant snapshot tự động đẩy lên cụm MinIO.
-3.  **Offsite Backup**: Các dữ liệu quan trọng nhất (MinIO buckets chứa code/bài nộp của sinh viên, snapshot Qdrant, base backup PostgreSQL) được định kỳ đồng bộ ngoại biên sang **Cloudflare R2** hoặc **S3-compatible Cloud Storage**.
-    *   *RPO mục tiêu*: Từ vài phút đến vài giờ tùy loại dữ liệu.
-    *   *RTO mục tiêu*: 15 – 60 phút đối với PostgreSQL; 2 – 4 tiếng đối với dữ liệu Object lớn.
-
----
-
-#### 1.2.3.7. Cấu hình phần cứng Node tổng thể (Cụm 3 Node vật lý)
-
-Cấu hình tối thiểu đề xuất cho **mỗi node máy chủ vật lý** trong cụm Kubernetes để chạy mượt mà toàn bộ Data Layer mốc 5 năm:
-
-*   **CPU**: 8 – 16 core.
-*   **RAM**: 64 – 128 GB.
-*   **Disk hệ điều hành (OS)**: 1 × SSD 512 GB.
-*   **Disk dữ liệu nóng (Hot Data)**: 1 × Enterprise NVMe SSD 1.92 TB (sử dụng cho StorageClass `local-nvme` của PostgreSQL và Qdrant).
-*   **Disk lưu trữ đối tượng (Object/Archive)**: 1 – 2 × HDD Enterprise 8 TB (sử dụng cho StorageClass `local-hdd-object` của MinIO).
-*   **Mạng**: Kết nối mạng nội bộ tối thiểu **10GbE** (khuyến nghị) hoặc 2.5GbE để đồng bộ dữ liệu Longhorn/MinIO nhanh chóng.
-
----
-## 1.3. Gitea Self-host vs GitHub API: Tích hợp Git cho sinh viên
-
-Khi xây dựng hệ thống AI Teaching Assistant, nhóm có hai hướng chính để quản lý mã nguồn bài nộp của sinh viên: **tự host Gitea** hoặc **tận dụng GitHub API/Webhook**. Về bản chất, phần Git chỉ đảm nhiệm lưu trữ repository và phát sinh sự kiện khi sinh viên nộp bài; các phần nặng như CI/autograding, AI review, sandbox, kiểm tra similarity và lưu kết quả vẫn do hệ thống Kubernetes của trường tự xử lý.
-
-### 1.3.1. So sánh ngắn gọn
-
-| Tiêu chí | Gitea Self-host | GitHub API / Webhook |
-|---|---|---|
-| Mô hình | Trường tự triển khai Git server trên hạ tầng riêng | Tận dụng hạ tầng GitHub để lưu repository |
-| Chi phí Git hosting | Tốn server, storage, backup, monitoring, vận hành | Gần như không phải vận hành hạ tầng Git |
-| Portfolio sinh viên | Hạn chế nếu repo nội bộ | Rất tốt, sinh viên có GitHub repo để đưa vào CV |
-| Tích hợp hệ thống | Có webhook/API, chủ động cao | Có webhook/API đầy đủ, dễ tích hợp với backend |
-| Kiểm soát dữ liệu | Cao, phù hợp bài thi/bài private | Phụ thuộc GitHub, repo public cần cân nhắc dữ liệu |
-| Vận hành | Cần tự backup, cập nhật, bảo mật, scale disk | GitHub xử lý uptime, storage, băng thông Git |
-| Phù hợp với PBL | Dùng được nhưng ít giá trị portfolio | Rất phù hợp với project-based learning |
-| Rủi ro sao chép | Thấp hơn nếu dùng private repo | Cao hơn nếu public, nhưng có thể kiểm soát bằng demo, commit history, similarity check và vấn đáp |
-
----
-
-### 1.3.2. Lý do chọn GitHub API/Webhook
-
-Nhóm đề xuất chọn **GitHub API/Webhook** làm phương án chính vì phù hợp hơn với định hướng **“đứng trên vai người khổng lồ”**: tận dụng hạ tầng GitHub thay vì tự xây và vận hành Git server.
-
-Thứ nhất, GitHub giúp giảm đáng kể chi phí và công sức vận hành. Nếu dùng Gitea, nhà trường phải tự lo server, dung lượng repository, backup, bảo mật, monitoring và xử lý sự cố. Với GitHub, phần Git hosting gần như được chuyển sang nền tảng có sẵn, còn hạ tầng Kubernetes của trường chỉ tập trung vào các thành phần cốt lõi như AI review, autograding, RAG, database và dashboard.
-
-Thứ hai, GitHub mang lại giá trị trực tiếp cho sinh viên. Các project public có thể trở thành portfolio thật khi sinh viên đi thực tập hoặc xin việc. Sinh viên cũng được làm quen với quy trình phát triển phần mềm phổ biến trong thực tế như commit, branch, Pull Request, issue và review.
-
-Thứ ba, GitHub Webhook giúp backend không cần polling liên tục. Khi sinh viên `push code` hoặc tạo Pull Request, GitHub sẽ gửi event về API Gateway của trường. Backend đưa event vào queue, worker nội bộ clone đúng commit, chạy test, AI review, kiểm tra similarity và lưu kết quả. Sau đó hệ thống chỉ gọi GitHub API để cập nhật trạng thái hoặc comment kết quả vào Pull Request.
-
-Luồng tổng quát:
-
-```txt
-Student push code / Pull Request
-        ↓
-GitHub Webhook
-        ↓
-API Gateway của trường
-        ↓
-Queue
-        ↓
-CI / AI Review Worker trong Kubernetes
-        ↓
-PostgreSQL / MinIO lưu kết quả
-        ↓
-GitHub API cập nhật status/comment
-````
-
-Thứ tư, trong project-based learning, việc sinh viên tham khảo hoặc tái sử dụng code không nhất thiết là xấu. Điều quan trọng là sinh viên có hiểu, tùy biến, tích hợp và bảo vệ được sản phẩm hay không. Vì vậy, GitHub public repo phù hợp với tinh thần học mở, đồng thời hệ thống vẫn có thể đánh giá công bằng thông qua commit history, demo, vấn đáp, kết quả CI và similarity check.
-
-### 1.3.3. Kết luận
-
-Phương án được chọn là:
-
-```txt
-GitHub API/Webhook làm Git hosting chính
-CI/autograding và AI review chạy trong Kubernetes của trường
-Gitea chỉ dùng làm phương án phụ cho bài thi, bài kiểm tra hoặc repo cần private tuyệt đối
-```
-
-Tóm lại, GitHub API giúp hệ thống giảm gánh nặng vận hành Git, tăng giá trị portfolio cho sinh viên và phù hợp hơn với mô hình project-based learning. Gitea vẫn có giá trị trong các trường hợp cần kiểm soát nội bộ tuyệt đối, nhưng không nên là lựa chọn chính nếu mục tiêu là mở rộng, tiết kiệm chi phí và tận dụng hạ tầng có sẵn.
-
-## 1.4. Sơ đồ triển khai hệ thống (Deployment Diagram)
-
-Dưới đây là sơ đồ triển khai toàn diện của hệ thống **AI Teaching Assistant Platform**, được phân bổ theo cụm Kubernetes nội bộ (On-premise 3-Node) kết hợp với các dịch vụ Cloud bổ trợ (Cloudflare, GitHub). Sơ đồ thể hiện cách các lớp (Layer 1 - Mạng, Layer 2 - Ứng dụng, Layer 3 - Dữ liệu) kết nối và vận hành thực tế.
-
-```mermaid
-graph TB
-    subgraph External_Zone["☁️ Tầng Đám Mây & Client (Cloud)"]
-        direction LR
-        Users["👥 Sinh viên / Giảng viên / Admin"]
-        GitHub["🐱 GitHub Cloud\n(Repos & Webhook Event)"]
-        R2["☁️ Cloudflare R2\n(Offsite Backups)"]
-    end
-
-    subgraph K8S_Cluster["☸️ Cụm Kubernetes (3 Node Vật Lý - LAN 10GbE)"]
-        
-        subgraph NS_Ingress["🌐 Namespace: ingress-system"]
-            Tunnel["🚇 Cloudflare Tunnel Pod\n(cloudflared)"]
-            Gateway["🚦 API Gateway Pod\n(Auth / Rate Limit / Routing)"]
-        end
-
-        subgraph NS_App["📦 Namespace: app-services"]
-            CMS["🖥️ CMS Service Pods\n(Scale ngang, xử lý CRUD)"]
-            AI["🧠 AI Service Pods\n(Scale ngang, RAG queries)"]
-            CI_Worker["⚙️ CI/Autograding Worker Pods\n(Nhận event, clone repo, chấm bài, check plagiarism)"]
-        end
-
-        subgraph NS_Data["🐘 Namespace: database-storage"]
-            subgraph PG_Cluster["PostgreSQL HA (CloudNativePG)"]
-                PG_P["🐘 Postgres Primary"]
-                PG_R1["🐘 Postgres Replica 1"]
-                PG_R2["🐘 Postgres Replica 2"]
-            end
-            
-            subgraph Redis_Cluster["Redis HA (Sentinel)"]
-                Redis_M["⚡ Redis Master"]
-                Redis_R["⚡ Redis Replicas"]
-            end
-
-            Qdrant["🔍 Qdrant StatefulSet\n(Vector DB)"]
-            
-            subgraph MinIO_Tenant["MinIO Tenant (Object Storage)"]
-                MinIO_Pods["☁️ MinIO Distributed Pods"]
-            end
-        end
-
-        subgraph Storage_CSI["💾 Storage CSI & Classes"]
-            SC_NVMe["⚡ StorageClass: local-nvme\n(NVMe SSD local trên Node)"]
-            SC_HDD["💿 StorageClass: local-hdd-object\n(HDD local trên Node)"]
-            SC_Longhorn["🛡️ StorageClass: longhorn-replicated\n(Replicated Block Storage)"]
-        end
-    end
-
-    %% External & Ingress connections
-    Users -->|HTTPS| Tunnel
-    GitHub -->|Webhooks| Tunnel
-    Tunnel --> Gateway
-
-    %% Gateway Routing
-    Gateway -->|HTTP / REST| CMS
-    Gateway -->|HTTP / REST / WS| AI
-
-    %% App to Data/Storage connections
-    CMS -->|Metadata / Auth| PG_P
-    CMS -->|Assets / Slide / Uploads| MinIO_Pods
-    AI -->|Semantic Queries| Qdrant
-    CMS & AI & CI_Worker -->|Cache / Rate Limit / Queues| Redis_M
-    CI_Worker -->|Autograding Logs / Code Zip| MinIO_Pods
-    CI_Worker -->|Save Grades & Plagiarism Status| PG_P
-
-    %% CI Webhook & API loop
-    GitHub -.->|1. Sends Webhook Event| Tunnel
-    CI_Worker -.->|2. Anonymously git clone| GitHub
-    CI_Worker -.->|3. Update Commit Status / PR Comment| GitHub
-
-    %% Storage Mounts (PVC)
-    PG_P & PG_R1 & PG_R2 -.->|PVC| SC_NVMe
-    Qdrant -.->|PVC| SC_NVMe
-    MinIO_Pods -.->|PVC| SC_HDD
-    Redis_M & Redis_R -.->|PVC| SC_Longhorn
-
-    %% Backup Flows
-    PG_P -->|Automated WAL/Backup| MinIO_Pods
-    Qdrant -->|Automated Snapshot| MinIO_Pods
-    MinIO_Pods -->|Sync ngoại biên| R2
-```
-
----
-
-### 1.4.1. Giải thích luồng hoạt động chính (Workflow)
-
-#### 1. Luồng Người Dùng & Quản Trị (Admins/Tutors/Students)
-*   Người dùng truy cập qua Domain của trường -> được bảo vệ bởi **Cloudflare (DNS/SSL/DDoS)**.
-*   Request đi qua **Cloudflare Tunnel (cloudflared)** được mã hóa an toàn đến cụm K8s nội bộ mà không cần mở port public trên router của trường.
-*   **API Gateway** tiếp nhận request, thực hiện xác thực (JWT Auth), kiểm soát tần suất (Rate Limiting) và điều phối traffic đến đúng service tương ứng: nghiệp vụ quản lý (**CMS Service**) hoặc tính năng trợ lý học tập (**AI Service**).
-
-#### 2. Luồng Nộp Bài & Tự Động Chấm Điểm (Autograding & Plagiarism Workflow)
-1.  Sinh viên thực hiện `git push` bài làm hoặc tạo Pull Request trên GitHub.
-2.  **GitHub Cloud** gửi sự kiện (Webhook) chứa thông tin commit về API Gateway thông qua Cloudflare Tunnel.
-3.  API Gateway đẩy task chấm bài vào hàng đợi trong **Redis Sentinel (Queue)**.
-4.  **CI/Autograding Worker** nhận task, thực hiện clone mã nguồn public từ GitHub cá nhân của sinh viên về thư mục tạm trong pod mà không cần xác thực token.
-5.  Worker chạy các bước:
-    *   **Autograding**: Build code, chạy các unit test / integration test để tính điểm logic.
-    *   **Anti-Plagiarism**: Gọi công cụ MOSS/JPlag quét đối chiếu độ trùng lặp với cơ sở dữ liệu các bài nộp cùng kỳ để phát hiện đạo văn.
-6.  Worker lưu trữ báo cáo log chi tiết và mã nguồn dạng nén (`.zip`) vào **MinIO Object Storage**, đồng thời lưu kết quả điểm số/trạng thái đạo văn vào **PostgreSQL HA**.
-7.  Worker gọi **GitHub API** (sử dụng PAT của hệ thống) để ghi kết quả (Pass/Fail) vào Commit Status hoặc bình luận nhận xét chi tiết vào Pull Request của sinh viên.
-
-#### 3. Luồng Quản Lý Tài Liệu & Phản Hồi RAG (AI Query Workflow)
-*   Khi Giảng viên upload slide/giáo trình mới trên **Tutor site**, **CMS Service** đẩy file vật lý vào **MinIO** và lưu metadata vào **PostgreSQL**.
-*   Một tiến trình background trigger **AI Service** lấy tài liệu từ MinIO, thực hiện bẻ nhỏ (chunking), chạy mô hình sinh vector (Embedding) và lưu index vào **Qdrant Vector Database**.
-*   Khi sinh viên hỏi đáp với chatbot AI trên **User site**, **AI Service** nhận câu hỏi, truy vấn ngữ nghĩa (ANN Search) đến **Qdrant** để lấy các đoạn tài liệu liên quan nhất, sau đó kết hợp với ngữ cảnh gửi đến mô hình ngôn ngữ lớn (LLM) để sinh câu trả lời chính xác, tránh hiện tượng ảo tưởng (hallucination).
-
-# 2. Phân tích các Bottleneck chính và Cơ chế giảm tải (Load Mitigation)
-
-Khi hệ thống AI Teaching Assistant Platform đi vào hoạt động thực tế với quy mô khoảng 1000 sinh viên hoạt động đồng thời (đặc biệt là trong các đợt deadline bài tập lớn), hệ thống sẽ đối mặt với nhiều điểm nghẽn nghiêm trọng. Dưới đây là phần phân loại, phân tích nguyên nhân và các giải pháp kỹ thuật chi tiết.
-
----
-
-## 2.1. Gom nhóm và phân tích nguyên nhân của các bottleneck
-
-Các điểm nghẽn của hệ thống được chia làm 4 nhóm chính dựa trên tính chất tài nguyên và luồng xử lý:
-
-```mermaid
-mindmap
-  root((Hệ thống Nghẽn))
-    Nhóm 1: Tải AI & RAG
-      Nhiều sinh viên hỏi AI cùng lúc
-      RAG quét Vector DB liên tục
-      Nguyên nhân: Latency LLM cao & Quét vector không lọc
-    Nhóm 2: Xử lý tài liệu
-      Upload tài liệu lớn
-      Parse/Chunk/Embedding chạy đồng bộ
-      Nguyên nhân: Tác vụ CPU-bound nghẽn luồng Web API
-    Nhóm 3: Chấm bài & CI
-      Dồn ứ webhook sát deadline
-      Chạy test code tốn CPU/RAM
-      Nguyên nhân: Spike tài nguyên đột biến & Sandbox không giới hạn
-    Nhóm 4: Dashboard & DB
-      Query learning events thô
-      Quá tải database chính
-      Nguyên nhân: OLAP đè lên OLTP & Thiếu index/cache
-```
-
-### 2.1.1. Nhóm 1: Tải AI Inference & RAG Retrieval (Độ trễ và tần suất truy vấn)
-*   **Các bottleneck liên quan**: 
-    *   Nhiều sinh viên hỏi chatbot AI cùng lúc.
-    *   Truy vấn RAG retrieval tìm tài liệu tham khảo với tần suất cao.
-*   **Phân tích nguyên nhân**:
-    *   **LLM Latency**: Thời gian xử lý của các mô hình ngôn ngữ lớn (LLM) rất dài (thường mất 2 - 10 giây cho một câu trả lời hoàn chỉnh). Nếu gọi đồng bộ qua Web API thông thường, thread pool của API Gateway sẽ nhanh chóng bị cạn kiệt, dẫn đến timeout (504 Gateway Timeout).
-    *   **Vector Search Overhead**: RAG đòi hỏi hệ thống phải tính toán embedding câu hỏi của sinh viên và tìm kiếm vector tương đồng (ANN Search) trên Qdrant. Nếu lượng vector index lớn và không được lọc trước, Qdrant phải quét không gian tìm kiếm rộng, tiêu tốn rất nhiều CPU và tăng độ trễ truy vấn.
-
-### 2.1.2. Nhóm 2: Xử lý tài liệu học tập (Tác vụ CPU-bound nặng)
-*   **Các bottleneck liên quan**:
-    *   Giảng viên upload tài liệu học tập lớn (slide PDF, giáo trình trăm trang, ảnh tài liệu cần OCR).
-*   **Phân tích nguyên nhân**:
-    *   **Blocking Web API**: Các tác vụ đọc file PDF, trích xuất text (parsing), chia đoạn (chunking) và gửi dữ liệu qua API để sinh embedding vector là các tác vụ tiêu tốn nhiều CPU và thời gian (vài phút). Việc chạy trực tiếp và đồng bộ các tác vụ này trên API xử lý request của giảng viên sẽ làm đứng hoàn toàn luồng Web Backend.
-
-### 2.1.3. Nhóm 3: Chạy thử nghiệm code & Đánh giá tự động (Spike tài nguyên đột biến)
-*   **Các bottleneck liên quan**:
-    *   Giai đoạn sát deadline, hàng loạt sinh viên push code và kích hoạt autograding/CI.
-*   **Phân tích nguyên nhân**:
-    *   **Resource Spike**: Việc chấm code sinh viên bắt buộc phải chạy code đó trong một môi trường cô lập (Sandbox container) và chạy các unit/integration test. Mỗi sandbox pod khởi chạy tiêu thụ tài nguyên CPU/RAM nhất định. Khi hàng trăm webhook đẩy về cùng một lúc trước deadline, cụm Node vật lý sẽ bị quá tải tức thì, gây hiện tượng OOM (Out Of Memory) sập toàn cụm.
-    *   **Không kiểm soát sandbox**: Sinh viên có thể vô tình hoặc cố ý viết code chứa vòng lặp vô hạn, hoặc code chiếm dụng hết CPU/RAM của node nếu không có cấu hình giới hạn tài nguyên khắt khe.
-
-### 2.1.4. Nhóm 4: Dashboard & Cơ sở dữ liệu chính (OLAP đè lên OLTP)
-*   **Các bottleneck liên quan**:
-    *   Dashboard thống kê học tập (Learning Events) truy vấn lượng dữ liệu khổng lồ.
-    *   Cơ sở dữ liệu chính (PostgreSQL) và Vector DB bị quá tải do thiếu cache/index/filter.
-*   **Phân tích nguyên nhân**:
-    *   **Trùng chéo Workload**: Báo cáo dashboard của giảng viên cần thực hiện các câu lệnh thống kê phức tạp (`COUNT`, `SUM`, `GROUP BY`) trên hàng triệu dòng log sự kiện học tập (learning events). Chạy các query dạng phân tích (OLAP) này trực tiếp trên cơ sở dữ liệu giao dịch chính (OLTP PostgreSQL) sẽ gây khóa bảng, khóa dòng, kéo sụp hiệu năng của các tác vụ ghi thông thường như đăng nhập, nộp bài, lưu lịch sử chat.
-    *   **Thiếu tối ưu hóa truy vấn**: Các bảng dữ liệu lớn không được đánh chỉ mục (index) đúng cách, hoặc Vector DB không sử dụng các bộ lọc phân vùng để thu hẹp không gian tìm kiếm.
-
----
-
-## 2.2. Giải pháp cho Nhóm 1: Tối ưu hóa Inference và RAG Retrieval
-
-Để giải quyết bài toán độ trễ phản hồi AI và giảm tải cho Vector DB, hệ thống áp dụng các giải pháp:
-
-1.  **Server-Sent Events (SSE) / Streaming Response**: Chuyển luồng giao tiếp chat sang dạng Stream. Trả kết quả theo từng từ (token) ngay khi LLM sinh ra. Điều này giảm thời gian chờ đợi cảm nhận của sinh viên xuống <100ms và giải phóng kết nối HTTP nhanh chóng, không block luồng xử lý của API Gateway.
-2.  **Semantic Caching (Redis)**: Sử dụng Redis làm bộ đệm ngữ nghĩa. Khi sinh viên hỏi một câu hỏi mới, AI Service chạy embedding câu hỏi đó và đối chiếu khoảng cách vector (Cosine Similarity) với các câu hỏi đã trả lời trước đó trong Redis. Nếu độ tương đồng >95% (ngưỡng tương đương), hệ thống trả về luôn câu trả lời đã cache mà không cần gọi LLM, tiết kiệm 90% chi phí và thời gian gọi LLM.
-3.  **Payload Filtering (Qdrant Filters)**: Lọc dữ liệu trước khi tìm kiếm vector. Backend bắt buộc phải truyền kèm `course_id` hoặc `lesson_id` làm bộ lọc. Qdrant chỉ thực hiện so khớp vector trên các phần dữ liệu thuộc môn học đó, giảm không gian tìm kiếm xuống 95%.
-4.  **Rate Limiting**: Áp dụng rate limit tại API Gateway (ví dụ: tối đa 10 câu hỏi/phút cho mỗi sinh viên) để tránh việc spam request phá hoại hệ thống.
-
----
-
-## 2.3. Giải pháp cho Nhóm 2: Bất đồng bộ hóa luồng xử lý tài liệu
-
-Để tránh nghẽn luồng Web API khi giảng viên cập nhật tài liệu học tập:
-
-1.  **Mô hình Task Queue (Redis/RabbitMQ)**: Khi giảng viên upload file slide, CMS Service chỉ lưu file vật lý vào MinIO và đẩy một event (ví dụ: `document.uploaded`) vào hàng đợi Redis Queue/RabbitMQ, sau đó lập tức trả về mã phản hồi `202 Accepted` cho frontend. Giảng viên có thể tiếp tục thao tác khác mà không phải chờ đợi.
-2.  **RAG Worker chạy ngầm (Background Worker)**: Một worker chạy nền sẽ lấy task từ queue ra để xử lý parse, chunk, embedding ở luồng chạy ngầm. Khi hoàn thành, worker cập nhật trạng thái "Ready" lên PostgreSQL và gửi thông báo (web push notification) cho giảng viên. Luồng này giúp Web API chính luôn mượt mà.
-
----
-
-## 2.4. Giải pháp cho Nhóm 3: Hàng đợi chấm bài và Sandbox cách ly
-
-Để bảo vệ hạ tầng K8s của trường không bị sập nguồn khi sinh viên nộp bài dồn dập:
-
-1.  **Hàng đợi chấm bài (Queue-based Webhook)**: Webhook push code gửi về từ GitHub sẽ không kích hoạt chạy test ngay lập tức mà được ghi nhận thành một task chấm bài trong hàng đợi Redis.
-2.  **Giới hạn Concurrent Workers**: Cấu hình số lượng CI Worker tối đa chạy đồng thời (ví dụ: tối đa 5 - 10 worker chạy song song tùy thuộc vào CPU/RAM còn trống của cụm Node vật lý). Các bài nộp còn lại sẽ nằm trong hàng đợi ở trạng thái `Pending`. Sinh viên có thể phải chờ 1 - 2 phút để nhận điểm, nhưng cụm K8s luôn hoạt động ổn định, không bị crash.
-3.  **Cách ly Sandbox bằng gVisor/sysbox**: Sử dụng các công nghệ container siêu nhẹ và an toàn để chạy code sinh viên, đồng thời giới hạn tài nguyên khắt khe cho mỗi sandbox pod (ví dụ: tối đa 0.5 CPU và 512MB RAM mỗi bài test) để ngăn chặn mã độc hoặc vòng lặp vô hạn của sinh viên phá hoại hệ thống.
-
----
-
-## 2.5. Giải pháp cho Nhóm 4: Tách biệt dữ liệu phân tích (CQRS & Pre-aggregation)
-
-Để đảm bảo hiệu năng PostgreSQL giao dịch và tăng tốc dashboard:
-
-1.  **CQRS / Read Replica**: Sử dụng mô hình tách biệt luồng ghi và luồng đọc. PostgreSQL chính chỉ dùng để ghi log sự kiện. Các truy vấn báo cáo của Dashboard sẽ được hướng sang một **Read Replica** (bản sao chỉ đọc) của PostgreSQL để tránh ảnh hưởng đến Master DB.
-2.  **Pre-aggregation (Tính toán tổng hợp trước)**: Thay vì tính toán trực tiếp trên dữ liệu thô mỗi khi giảng viên tải trang dashboard, hệ thống chạy các job định kỳ (CronJob nửa tiếng một lần) để tổng hợp sẵn dữ liệu (ví dụ: số bài nộp thành công của lớp, điểm trung bình theo tuần) vào các bảng tổng hợp (Summary Tables). Trang dashboard chỉ việc SELECT từ bảng Summary này với độ trễ <10ms.
-3.  **TimescaleDB / ClickHouse**: Ở mốc tải lớn hơn, chuyển các learning events sang một database chuyên dụng cho Time-Series hoặc phân tích (như ClickHouse) để tối ưu hiệu năng truy vấn báo cáo.
-
----
-
-## 2.6. Tóm tắt cơ chế giảm tải kiến nghị
-
-| Nhóm Bottleneck | Cơ chế giảm tải đề xuất | Công nghệ sử dụng | Hiệu quả mang lại |
-| :--- | :--- | :--- | :--- |
-| **Tải AI & RAG (Nhóm 1)** | Streaming Response + Semantic Cache | Redis (Vector Search) + SSE | Giảm perceived latency <100ms, tiết kiệm 90% chi phí gọi LLM API. |
-| **RAG Queries (Nhóm 1)** | Payload Pre-filtering | Qdrant filters | Giới hạn không gian tìm kiếm vector theo môn học, tăng tốc độ retrieve. |
-| **Parsing & Chunking (Nhóm 2)** | Task Queue & Background Workers | Redis Queue / RabbitMQ | Tránh nghẽn Web API, đảm bảo trải nghiệm upload tài liệu mượt mà. |
-| **Autograding (CI) (Nhóm 3)** | Hàng đợi chấm bài + Giới hạn Concurrent Pods | K8s Job + gVisor/sysbox | Bảo vệ cụm K8s khỏi sập nguồn do quá tải CPU/RAM, cô lập mã nguồn sinh viên an toàn. |
-| **Dashboard Analytics (Nhóm 4)** | Read Replica + Bảng tổng hợp trước | PostgreSQL Replica / Summary Tables | Tránh khóa bảng DB chính, load biểu đồ dashboard gần như ngay lập tức. |
-| **File Storage (Tất cả)** | Object Storage thay vì Local Disk | MinIO Tenant | Giải phóng bộ nhớ đĩa cục bộ, cho phép scale ngang backend dễ dàng (stateless). |
-
----
-
-# 3. Tầng giám sát hệ thống (Monitoring Layer)
-
-Đây là tầng cuối cùng trong kiến trúc 7 lớp của hệ thống — và cũng là tầng thường bị bỏ qua cho đến khi có sự cố xảy ra. Tầng giám sát không phục vụ trực tiếp người dùng nhưng đóng vai trò thiết yếu để đảm bảo toàn bộ hệ thống vận hành ổn định, phát hiện lỗi sớm và hỗ trợ đội vận hành phản ứng kịp thời.
-
----
-
-## 3.1. Ba trụ cột của Observability
-
-Observability (khả năng quan sát) của hệ thống hiện đại được xây dựng trên 3 trụ cột chính:
-
-```mermaid
-graph LR
-    subgraph Observability["🔭 Observability Stack"]
-        Metrics["📊 Metrics\n(Prometheus + Grafana)\nSố liệu đo lường\ntheo thời gian thực"]
-        Logs["📜 Logs\n(Loki / Fluentd)\nNhật ký sự kiện\ntừ tất cả service"]
-        Traces["🔍 Distributed Tracing\n(Tempo / Jaeger)\nLuồng xử lý\nxuyên suốt service"]
-    end
-
-    subgraph Alerts["🚨 Alerting"]
-        AM["Alertmanager\n(Threshold-based)"]
-        Grafana_Alert["Grafana Alerts\n(Anomaly-based)"]
-    end
-
-    subgraph Targets["🎯 Hệ thống được giám sát"]
-        K8s["☸️ Kubernetes Nodes"]
-        App["📦 App Services\n(CMS, AI, CI Worker)"]
-        DB["🐘 Databases\n(PG, Qdrant, Redis)"]
-        Infra["💾 Storage\n(MinIO, Longhorn)"]
-    end
-
-    Targets --> Metrics
-    Targets --> Logs
-    Targets --> Traces
-    Metrics --> AM
-    Metrics --> Grafana_Alert
-    AM -->|"Slack / Email / PagerDuty"| Team["👥 Đội vận hành"]
-    Grafana_Alert --> Team
-```
-
----
-
-## 3.2. Metrics — Đo lường hiệu năng theo thời gian thực
-
-**Công nghệ chọn**: **Prometheus** (thu thập) + **Grafana** (trực quan hóa).
-
-### 3.2.1. Các nhóm metric quan trọng cần theo dõi
-
-#### Nhóm 1: Metrics cơ sở hạ tầng (Infrastructure)
-*   **Node Exporter**: CPU usage, RAM usage, Disk I/O (IOPS/throughput), Network I/O trên từng Node vật lý.
-*   **kube-state-metrics**: Trạng thái Pods (Running/Pending/CrashLoopBackOff), Deployment ready replicas, PVC Bound/Pending, Node conditions (Ready/NotReady).
-
-#### Nhóm 2: Metrics tầng ứng dụng (Application)
-*   **CMS Service & AI Service**: HTTP request rate, Error rate (4xx/5xx), P95/P99 latency theo từng endpoint.
-*   **CI/Autograding Worker**: Số task đang chạy, số task đang trong hàng đợi (Queue depth), thời gian trung bình chấm một bài.
-*   **RAG Worker**: Thời gian xử lý trung bình mỗi tài liệu (parse + chunk + embed), số tài liệu đang chờ xử lý.
-
-#### Nhóm 3: Metrics cơ sở dữ liệu (Database)
-*   **PostgreSQL (CloudNativePG)**: TPS (Transactions/giây), số kết nối active/idle, thời gian replication lag, cache hit ratio, các slow query (>1s).
-*   **Qdrant**: Query latency (ANN Search time), số vector đã index, throughput (requests/giây).
-*   **Redis**: Memory usage (%), hit rate, số kết nối, độ dài queue.
-
-#### Nhóm 4: Metrics lưu trữ (Storage)
-*   **MinIO**: Disk usage, Request rate (PUT/GET), Bandwidth consumed.
-*   **Longhorn**: Volume health status, Rebuild progress, IOPS/throughput của từng volume.
-
----
-
-## 3.3. Logs — Nhật ký sự kiện tập trung
-
-**Công nghệ chọn**: **Promtail** (thu thập log từ các Pod) → **Loki** (lưu trữ & indexing log) → **Grafana** (tìm kiếm & trực quan hóa).
-
-*   **Ưu điểm của Loki so với Elasticsearch (ELK)**: Loki không index toàn bộ nội dung log mà chỉ index các label (metadata như `service`, `namespace`, `pod`). Điều này giúp Loki nhẹ hơn 90% so với ELK, phù hợp với cụm 3-Node có tài nguyên giới hạn.
-
-### 3.3.1. Chuẩn hóa định dạng log
-
-Tất cả các service phải xuất log theo định dạng **JSON có cấu trúc** để Loki có thể phân tích và lọc hiệu quả:
-
-```json
-{
-  "timestamp": "2025-06-03T08:30:00Z",
-  "level": "INFO",
-  "service": "ai-service",
-  "trace_id": "abc123def456",
-  "user_id": "student_001",
-  "course_id": "ML-2025",
-  "message": "RAG query completed",
-  "latency_ms": 340,
-  "retrieved_chunks": 5
-}
-```
-
-*   **`trace_id`**: Mã định danh duy nhất cho mỗi request, dùng để liên kết log từ nhiều service khác nhau (ví dụ: từ API Gateway → CMS Service → AI Service → Qdrant).
-
----
-
-## 3.4. Distributed Tracing — Theo dõi luồng xử lý xuyên service
-
-**Công nghệ chọn**: **OpenTelemetry SDK** (instrument code) → **Tempo** (lưu trữ trace) → **Grafana** (trực quan hóa).
-
-Khi một sinh viên hỏi AI chatbot, request thực tế đi qua nhiều service: `API Gateway → AI Service → Qdrant → (LLM API)`. Nếu chỉ nhìn vào log riêng lẻ của từng service, rất khó xác định bước nào đang chiếm thời gian nhiều nhất.
-
-Distributed Tracing tạo ra một **Trace** duy nhất cho toàn bộ hành trình của request đó, bao gồm các **Span** con đại diện cho công việc của từng service:
-
-```txt
-Trace: student_question_abc123 (tổng 3.2s)
-├── [API Gateway] Auth & Rate limit check       →  12ms
-├── [AI Service] Embed student question          → 250ms
-├── [Qdrant]     ANN Search (course_id=ML-2025) → 180ms
-├── [AI Service] Build LLM prompt               →  15ms
-└── [LLM API]    Generate answer (stream)        → 2.74s  ← bottleneck!
-```
-
----
-
-## 3.5. Alerting — Cảnh báo chủ động
-
-**Công nghệ chọn**: **Alertmanager** (đi kèm Prometheus) + **Grafana Alerts**, gửi thông báo qua Slack/Email.
-
-### 3.5.1. Các ngưỡng cảnh báo quan trọng (Alert Rules)
-
-| Cấp độ | Điều kiện kích hoạt | Hành động |
-| :--- | :--- | :--- |
-| 🔴 **CRITICAL** | Node CPU > 90% trong 5 phút liên tục | Cảnh báo Slack ngay + Email đội vận hành |
-| 🔴 **CRITICAL** | PostgreSQL Primary down > 30 giây | Cảnh báo ngay, CloudNativePG kích hoạt failover tự động |
-| 🟠 **WARNING** | CI Worker queue depth > 50 tasks đang chờ | Cảnh báo Slack, xem xét tăng số worker tạm thời |
-| 🟠 **WARNING** | AI Service P99 latency > 15 giây trong 2 phút | Cảnh báo Slack, kiểm tra LLM endpoint |
-| 🟡 **INFO** | MinIO disk usage > 75% | Nhắc nhở lên kế hoạch mở rộng dung lượng |
-| 🟡 **INFO** | PostgreSQL Replication lag > 30 giây | Kiểm tra băng thông mạng giữa các node |
-
----
-
-## 3.6. Cấu hình tài nguyên cho Monitoring Stack
-
-Stack giám sát được triển khai trên cụm K8s trong namespace riêng (`monitoring`) và cần PVC để lưu dữ liệu lịch sử:
-
-| Thành phần | CPU Request | RAM Request | Storage (PVC) | StorageClass |
-| :--- | :--- | :--- | :--- | :--- |
-| **Prometheus** | 500m | 1 GB | 50 – 100 GB (15 ngày data) | `longhorn-replicated` |
-| **Grafana** | 200m | 256 MB | 5 GB (dashboards/config) | `longhorn-replicated` |
-| **Loki** | 500m | 512 MB | 50 – 100 GB (30 ngày log) | `longhorn-replicated` |
-| **Tempo** | 300m | 512 MB | 20 – 50 GB (7 ngày trace) | `longhorn-replicated` |
-| **Alertmanager** | 100m | 128 MB | 1 GB | `longhorn-replicated` |
-
-> Toàn bộ stack monitoring sử dụng `longhorn-replicated` để đảm bảo dữ liệu giám sát được nhân bản và không bị mất khi một node vật lý gặp sự cố. Không dùng `local-nvme` vì monitoring không cần I/O thấp — độ bền dữ liệu quan trọng hơn tốc độ.
+## 3. Bottleneck, lý do và giải pháp
+
+| Bottleneck                      | Lý do                                                                 | Giải pháp                                                                |
+| ------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| AI inference / LLM response     | LLM phản hồi chậm, nhiều sinh viên hỏi cùng lúc                       | Streaming response, cache câu hỏi phổ biến, rate limit, fallback model   |
+| LLM API quota / chi phí         | Nếu dùng LLM ngoài có thể bị giới hạn quota hoặc tăng chi phí         | Giới hạn lượt hỏi, phân tầng model rẻ/mạnh, semantic cache               |
+| RAG retrieval                   | Truy vấn vector nhiều và rộng làm chậm phản hồi                       | Tách collection theo course, filter theo lesson/rubric, rerank top-k nhỏ |
+| Upload tài liệu lớn             | PDF/slide lớn làm nghẽn backend nếu xử lý trực tiếp                   | Upload vào object storage, xử lý async qua queue                         |
+| Parse/OCR/chunking              | CPU-bound, mất thời gian                                              | Tách RAG worker, scale worker theo backlog                               |
+| Embedding/indexing              | Gọi embedding API chậm hoặc tốn chi phí, indexing nặng                | Batch embedding, cache embedding, retry có kiểm soát                     |
+| Vector DB phình to              | Nhiều môn học và tài liệu làm index lớn                               | Chia collection theo course, metadata filter, cleanup dữ liệu cũ         |
+| PostgreSQL quá tải              | Nhiều chat logs, learning events, progress tracking                   | Batch insert, partition theo course/time, index hợp lý                   |
+| Dashboard analytics nặng        | Query thống kê đè lên database giao dịch                              | Summary table, materialized view, read replica                           |
+| CI/autograding nghẽn            | Gần deadline có nhiều PR/push, test tốn CPU/RAM                       | Queue hóa webhook, giới hạn worker đồng thời, timeout job                |
+| CI ảnh hưởng hệ thống chính     | Nếu chạy chung với API/DB sẽ làm chậm toàn hệ thống                   | Tách CI node, resource quota, sandbox riêng                              |
+| Git repository phình dung lượng | Sinh viên commit artifact, `.jar`, `target/`, dataset                 | Bắt buộc `.gitignore`, giới hạn file size, artifact lưu object storage   |
+| Object storage đầy              | File, bài nộp, artifact, backup tăng nhanh                            | Quota theo course, lifecycle policy, disk monitoring                     |
+| Redis/Queue nghẽn               | Nhiều job AI/RAG/CI cùng lúc làm backlog dài                          | Tách queue theo loại job, priority queue, concurrency limit              |
+| WebSocket/session lỗi khi scale | Backend nhiều replica nhưng session lưu trong RAM                     | Redis session store, sticky session hoặc event bus                       |
+| Monitoring phình dữ liệu        | Logs/metrics/traces tăng nhanh                                        | Retention policy, sampling trace, giới hạn log level                     |
+| Backup/restore lỗi              | HA không thay thế backup, vẫn có rủi ro xóa nhầm/hỏng dữ liệu         | Backup định kỳ, restore drill, backup ngoài cụm                          |
+| Sandbox security                | CI chạy code sinh viên có rủi ro chiếm tài nguyên hoặc escape sandbox | Node riêng, network policy, seccomp/AppArmor, timeout, quota             |
+| Secret bị lộ                    | API key, DB password, LLM key nếu commit nhầm sẽ nguy hiểm            | Secret manager, không commit `.env`, rotate key định kỳ                  |
+| Vendor dependency ở Demo        | Free tier có thể đổi quota/chính sách                                 | Có Docker Compose local fallback                                         |
+
+## 4. Kết luận ngắn
+
+Bản Demo nên dùng hướng **hybrid/free-first**: Supabase cho database, R2/Supabase Storage cho object storage, Qdrant Cloud/pgvector cho vector DB, Upstash Redis cho cache/queue, LLM API ngoài cho AI. Phần tự build gồm frontend, backend, AI workflow, RAG worker và autograding đơn giản. Cấu hình server nhỏ 2–4 vCPU, 4–8 GB RAM là đủ nếu dùng managed service.
+
+Bản Prod nên dùng **Kubernetes self-host**, tách app, data, AI/RAG, CI/autograding và monitoring. Với mục tiêu khoảng 1000 user đồng thời, nên hướng tới 7–9 node trở lên. Các bottleneck chính nằm ở AI/RAG, upload tài liệu, vector DB, PostgreSQL event tracking, CI/autograding, object storage và backup/restore.
