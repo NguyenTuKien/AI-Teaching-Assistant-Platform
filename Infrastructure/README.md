@@ -1,139 +1,199 @@
-# Tóm tắt kiến trúc Demo, Prod và Bottleneck
+# 1. Demo
 
-## 1. Bản Demo
+## 1.1. Mục tiêu Demo
 
-Bản Demo ưu tiên triển khai nhanh, tiết kiệm chi phí và chứng minh được các luồng chính của hệ thống. Hướng phù hợp là **hybrid/free-first**, tức là tận dụng tài nguyên free/managed service có sẵn, chỉ tự chạy các thành phần cần custom logic.
+* **Thời gian phát triển:** khoảng 2 tuần.
+* **Quy mô thử nghiệm:** khoảng 10–15 người dùng.
+* **Mục tiêu:** kiểm tra tính khả thi của giải pháp, demo các luồng chính, thu thập phản hồi từ giảng viên/sinh viên và phát hiện các vấn đề tiềm ẩn trước khi triển khai rộng hơn.
 
-### 1.1. Thành phần và công nghệ Demo
+Ở giai đoạn Demo, hệ thống nên ưu tiên:
 
-| Thành phần     | Công nghệ đề xuất                                             | Ghi chú                                                     |
-| -------------- | ------------------------------------------------------------- | ----------------------------------------------------------- |
-| Frontend       | Vercel, Cloudflare Pages, Netlify hoặc Nginx container        | Gồm 3 site: Admin, User/Sinh viên, Tutor                    |
-| Backend/API    | 1 backend service trên VPS, Render/Railway/Fly.io hoặc Docker | Xử lý nghiệp vụ chính: course, project, progress, dashboard |
-| Database       | Supabase Postgres hoặc PostgreSQL local                       | Demo nên ưu tiên Supabase để giảm vận hành                  |
-| Object Storage | Cloudflare R2, Supabase Storage hoặc MinIO local              | Lưu slide, giáo trình, project spec, bài nộp                |
-| Vector DB      | Qdrant Cloud, Supabase pgvector hoặc Qdrant local             | Lưu embedding phục vụ RAG                                   |
-| Cache/Queue    | Upstash Redis hoặc Redis local                                | Cache, queue nhẹ cho RAG/job                                |
-| AI/LLM         | OpenAI/Gemini/Claude API hoặc model API ngoài                 | Không cần GPU nếu gọi API ngoài                             |
-| RAG Worker     | Service tự build                                              | Parse tài liệu, chunking, embedding, indexing               |
-| Git Repository | Gitea nhỏ hoặc GitHub/Gitea cloud tạm thời                    | Demo có thể dùng tạm, Prod ưu tiên Gitea self-host          |
-| CI/Autograding | Mock worker, Jenkins nhỏ, Gitea Actions hoặc GitHub Actions   | Chỉ cần chứng minh luồng nộp bài → nhận feedback            |
-| Monitoring     | Provider logs, Docker logs, Sentry free tier, Portainer       | Chưa cần full monitoring stack                              |
+> **Open-source core + cloud/free tier để triển khai nhanh và tiết kiệm chi phí.**
 
-### 1.2. Yêu cầu phần cứng Demo
-
-Nếu dùng managed service như Supabase, R2, Qdrant Cloud, Upstash:
-
-| Hạng mục          | Đề xuất                                 |
-| ----------------- | --------------------------------------- |
-| Số server tự quản | 0–1 server                              |
-| CPU               | 2–4 vCPU                                |
-| RAM               | 4–8 GB                                  |
-| Disk              | 50–100 GB SSD                           |
-| Network           | 1 Gbps hoặc cloud network mặc định      |
-| GPU               | Không cần                               |
-| Phù hợp           | 30–50 user đồng thời, 1–2 môn học pilot |
-
-Nếu muốn chạy toàn bộ bằng Docker Compose local:
-
-| Hạng mục |  Tối thiểu | Khuyến nghị |
-| -------- | ---------: | ----------: |
-| CPU      |     4 vCPU |      8 vCPU |
-| RAM      |       8 GB |       16 GB |
-| Disk     | 200 GB SSD |  500 GB SSD |
-| GPU      |  Không cần |   Không cần |
-
-### 1.3. Kết luận Demo
-
-Bản Demo nên ưu tiên **cloud-first** để giảm công vận hành. Nhóm chỉ cần tập trung build frontend, backend, AI workflow và RAG pipeline. Tuy nhiên, vẫn nên chuẩn bị **Docker Compose local fallback** để có thể chạy offline hoặc thay thế khi free tier gặp giới hạn.
+Nghĩa là phần lõi vẫn dựa trên các công nghệ open-source hoặc có thể thay thế bằng open-source, nhưng tài nguyên chạy thử như database, Redis, object storage, vector database, hosting frontend nên tận dụng các dịch vụ cloud miễn phí.
 
 ---
 
-## 2. Bản Prod
+## 1.2. Chi tiết triển khai Demo
 
-Bản Prod hướng tới triển khai ổn định trên Kubernetes, có khả năng mở rộng, kiểm soát dữ liệu nội bộ và tách riêng các workload nặng như AI/RAG, database, Git và CI/autograding.
-
-### 2.1. Thành phần và công nghệ Prod
-
-| Thành phần            | Công nghệ đề xuất                                                  | Ghi chú                                         |
-| --------------------- | ------------------------------------------------------------------ | ----------------------------------------------- |
-| Frontend              | 3 site riêng: Admin, User/Sinh viên, Tutor                         | Deploy độc lập, scale riêng                     |
-| Backend/API           | Modular services hoặc microservices trên Kubernetes                | Stateless, scale ngang bằng replica/HPA         |
-| API Gateway / Ingress | Cloudflare, Cloudflare Tunnel, Ingress Controller hoặc Gateway API | TLS, routing, rate limit                        |
-| AI/Tutor Service      | Tutor orchestration, prompt workflow, guardrails                   | Tách khỏi API chính                             |
-| RAG Pipeline          | Parser, chunker, embedding worker, indexing worker                 | Xử lý async qua queue                           |
-| Database              | PostgreSQL HA bằng CloudNativePG                                   | Dữ liệu user, course, project, progress, rubric |
-| Vector DB             | Qdrant self-host                                                   | Nên dùng NVMe cho tốc độ truy vấn               |
-| Object Storage        | MinIO distributed                                                  | Lưu tài liệu, bài nộp, artifact, backup         |
-| Cache/Queue           | Redis Sentinel/Redis Cluster hoặc queue chuyên dụng                | Cache, session, job queue                       |
-| Git Repository        | Gitea self-host                                                    | Quản lý repo, PR, issue, webhook                |
-| CI/Autograding        | Jenkins độc lập, Gitea Actions Runner hoặc worker riêng            | Chạy trên node riêng, sandbox cách ly           |
-| Monitoring            | Prometheus, Grafana, Loki, Tempo, Alertmanager                     | Metrics, logs, tracing, alert                   |
-| Storage               | Local NVMe, MinIO, Longhorn cho workload phụ                       | Data nóng nên ưu tiên NVMe                      |
-
-### 2.2. Các mức cluster Prod
-
-| Mức triển khai   |  Số node | Phù hợp                                             |
-| ---------------- | -------: | --------------------------------------------------- |
-| Prod tối thiểu   |   3 node | Pilot production, tải vừa, workload còn trộn nhiều  |
-| Prod nhỏ         |   5 node | Một vài lớp/môn học, đã tách app/data/worker cơ bản |
-| Prod khuyến nghị | 7–9 node | Mục tiêu khoảng 1000 user đồng thời                 |
-| Prod mở rộng     | 10+ node | Nhiều môn/khoa, tải lớn dài hạn                     |
-
-### 2.3. Cấu hình Prod khuyến nghị
-
-| Nhóm node           | Số node | Vai trò                                                    | Cấu hình gợi ý                              |
-| ------------------- | ------: | ---------------------------------------------------------- | ------------------------------------------- |
-| Control-plane/Infra |       3 | Kubernetes control-plane, ingress, system service nhẹ      | 4–8 core, 16–32 GB RAM                      |
-| App node            |       2 | Frontend, backend API, auth, course service, dashboard API | 8–16 core, 32–64 GB RAM                     |
-| Data node           |       3 | PostgreSQL HA, Qdrant, Redis, MinIO                        | 16 core, 64–128 GB RAM, NVMe + HDD/SSD data |
-| Worker/CI node      |     1–2 | AI/RAG worker, Jenkins/Gitea runner, sandbox               | 16–32 core, 64–128 GB RAM                   |
-
-### 2.4. Storage Prod
-
-| Loại dữ liệu          | Nên dùng                                      | Lý do                                  |
-| --------------------- | --------------------------------------------- | -------------------------------------- |
-| PostgreSQL            | Local NVMe + CloudNativePG backup/replication | Cần IOPS cao                           |
-| Qdrant/vector DB      | Local NVMe                                    | Truy vấn vector và indexing cần tốc độ |
-| File/tài liệu/bài nộp | MinIO distributed                             | Dễ mở rộng, phù hợp object lớn         |
-| Gitea repositories    | SSD/NVMe riêng                                | Tránh chung với CI artifact            |
-| CI artifact/log       | MinIO hoặc object storage riêng               | Không làm phình Git repo               |
-| Monitoring data       | Longhorn hoặc storage bền vững riêng          | Có retention policy                    |
-| Backup                | Offsite/S3-compatible storage                 | Phục hồi khi có sự cố                  |
-
-### 2.5. Kết luận Prod
-
-Cụm 3 node chỉ nên xem là mức tối thiểu hoặc pilot production. Nếu mục tiêu là khoảng 1000 user đồng thời, nên hướng tới 7–9 node trở lên để tách rõ app, data, AI/RAG worker, CI/autograding và monitoring. Đặc biệt, không nên để CI/autograding hoặc RAG worker chạy chung với database node.
+| Thành phần      | Mô tả                                                       | Công nghệ đề xuất                                              | Ghi chú tài nguyên                                   |
+| --------------- | ----------------------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------------------- |
+| Frontend        | Giao diện cho 2 role: Lecturer và Student                   | Vercel / Cloudflare Pages / Netlify                            | Dùng free tier, không cần server riêng               |
+| Backend         | Xử lý nghiệp vụ: user, course, project, progress, dashboard | Tự build hoặc tham khảo Moodle, Open edX, Canvas LMS, Sakai    | Chạy bằng Docker trên VPS nhỏ                        |
+| Redis / Cache   | Lưu cache, session tạm thời, queue nhẹ                      | Redis Cloud / Upstash Redis                                    | Dùng free tier                                       |
+| Database        | Lưu user, lớp học, bài tập, kết quả, progress               | Supabase PostgreSQL                                            | Dùng free tier, giảm công vận hành                   |
+| Object Storage  | Lưu slide, giáo trình, file bài tập, kết quả                | Cloudflare R2 / Supabase Storage                               | Dùng free tier, tránh lưu file trực tiếp trên server |
+| Vector Database | Lưu embedding phục vụ RAG                                   | Qdrant Cloud / Pinecone / Weaviate Cloud / Supabase pgvector   | Dùng free tier                                       |
+| Gateway         | Định tuyến API, rate limit cơ bản                           | Kong Gateway OSS / Nginx / Traefik                             | Chỉ cần nếu backend tách nhiều service               |
+| AI Service      | Xử lý AI tutor, RAG workflow, guardrails                    | RAGFlow, LangChain, LlamaIndex, Haystack hoặc service tự build | Không self-host LLM, gọi API ngoài                   |
+| Git Repo        | Quản lý mã nguồn bài nộp/project                            | Gitea self-host hoặc GitHub tạm thời                           | Demo có thể chạy Gitea nhỏ                           |
+| CI/Autograding  | Chứng minh luồng push code → review/test → feedback         | Mock worker / Gitea Actions / GitHub Actions                   | Chỉ cần demo flow, chưa cần sandbox phức tạp         |
+| Monitoring      | Theo dõi log/lỗi cơ bản                                     | Docker logs, Sentry free, provider logs                        | Chưa cần Prometheus/Grafana đầy đủ                   |
 
 ---
 
-## 3. Bottleneck, lý do và giải pháp
+## 1.3. Server cần cho Demo
 
-| Bottleneck                      | Lý do                                                                 | Giải pháp                                                                |
-| ------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| AI inference / LLM response     | LLM phản hồi chậm, nhiều sinh viên hỏi cùng lúc                       | Streaming response, cache câu hỏi phổ biến, rate limit, fallback model   |
-| LLM API quota / chi phí         | Nếu dùng LLM ngoài có thể bị giới hạn quota hoặc tăng chi phí         | Giới hạn lượt hỏi, phân tầng model rẻ/mạnh, semantic cache               |
-| RAG retrieval                   | Truy vấn vector nhiều và rộng làm chậm phản hồi                       | Tách collection theo course, filter theo lesson/rubric, rerank top-k nhỏ |
-| Upload tài liệu lớn             | PDF/slide lớn làm nghẽn backend nếu xử lý trực tiếp                   | Upload vào object storage, xử lý async qua queue                         |
-| Parse/OCR/chunking              | CPU-bound, mất thời gian                                              | Tách RAG worker, scale worker theo backlog                               |
-| Embedding/indexing              | Gọi embedding API chậm hoặc tốn chi phí, indexing nặng                | Batch embedding, cache embedding, retry có kiểm soát                     |
-| Vector DB phình to              | Nhiều môn học và tài liệu làm index lớn                               | Chia collection theo course, metadata filter, cleanup dữ liệu cũ         |
-| PostgreSQL quá tải              | Nhiều chat logs, learning events, progress tracking                   | Batch insert, partition theo course/time, index hợp lý                   |
-| Dashboard analytics nặng        | Query thống kê đè lên database giao dịch                              | Summary table, materialized view, read replica                           |
-| CI/autograding nghẽn            | Gần deadline có nhiều PR/push, test tốn CPU/RAM                       | Queue hóa webhook, giới hạn worker đồng thời, timeout job                |
-| CI ảnh hưởng hệ thống chính     | Nếu chạy chung với API/DB sẽ làm chậm toàn hệ thống                   | Tách CI node, resource quota, sandbox riêng                              |
-| Git repository phình dung lượng | Sinh viên commit artifact, `.jar`, `target/`, dataset                 | Bắt buộc `.gitignore`, giới hạn file size, artifact lưu object storage   |
-| Object storage đầy              | File, bài nộp, artifact, backup tăng nhanh                            | Quota theo course, lifecycle policy, disk monitoring                     |
-| Redis/Queue nghẽn               | Nhiều job AI/RAG/CI cùng lúc làm backlog dài                          | Tách queue theo loại job, priority queue, concurrency limit              |
-| WebSocket/session lỗi khi scale | Backend nhiều replica nhưng session lưu trong RAM                     | Redis session store, sticky session hoặc event bus                       |
-| Monitoring phình dữ liệu        | Logs/metrics/traces tăng nhanh                                        | Retention policy, sampling trace, giới hạn log level                     |
-| Backup/restore lỗi              | HA không thay thế backup, vẫn có rủi ro xóa nhầm/hỏng dữ liệu         | Backup định kỳ, restore drill, backup ngoài cụm                          |
-| Sandbox security                | CI chạy code sinh viên có rủi ro chiếm tài nguyên hoặc escape sandbox | Node riêng, network policy, seccomp/AppArmor, timeout, quota             |
-| Secret bị lộ                    | API key, DB password, LLM key nếu commit nhầm sẽ nguy hiểm            | Secret manager, không commit `.env`, rotate key định kỳ                  |
-| Vendor dependency ở Demo        | Free tier có thể đổi quota/chính sách                                 | Có Docker Compose local fallback                                         |
+Vì Database, Redis, Object Storage, Vector DB và Frontend đều dùng cloud/free tier, server Demo chỉ cần chạy:
 
-## 4. Kết luận ngắn
+* Backend.
+* AI/RAG service.
+* Gitea nhỏ hoặc Git integration service.
+* Gateway nếu cần.
+* Worker nhỏ cho xử lý tài liệu hoặc mock CI.
 
-Bản Demo nên dùng hướng **hybrid/free-first**: Supabase cho database, R2/Supabase Storage cho object storage, Qdrant Cloud/pgvector cho vector DB, Upstash Redis cho cache/queue, LLM API ngoài cho AI. Phần tự build gồm frontend, backend, AI workflow, RAG worker và autograding đơn giản. Cấu hình server nhỏ 2–4 vCPU, 4–8 GB RAM là đủ nếu dùng managed service.
+### Cấu hình tối thiểu
 
-Bản Prod nên dùng **Kubernetes self-host**, tách app, data, AI/RAG, CI/autograding và monitoring. Với mục tiêu khoảng 1000 user đồng thời, nên hướng tới 7–9 node trở lên. Các bottleneck chính nằm ở AI/RAG, upload tài liệu, vector DB, PostgreSQL event tracking, CI/autograding, object storage và backup/restore.
+| Tài nguyên |      Đề xuất |
+| ---------- | -----------: |
+| CPU        |       2 vCPU |
+| RAM        |       2–4 GB |
+| Storage    | 20–40 GB SSD |
+| GPU        |    Không cần |
+
+### Cấu hình khuyến nghị
+
+| Tài nguyên |      Đề xuất |
+| ---------- | -----------: |
+| CPU        |       4 vCPU |
+| RAM        |       4–8 GB |
+| Storage    | 40–80 GB SSD |
+| GPU        |    Không cần |
+
+Với quy mô 10–15 người dùng, cấu hình 4 vCPU, 4 GB RAM, 40 GB SSD là hợp lý hơn so với 2 GB RAM và 10 GB storage, vì Gitea, backend và AI/RAG service chạy chung sẽ khá dễ thiếu RAM/disk nếu có upload tài liệu hoặc repo code.
+
+---
+
+## 1.4. Kết luận Demo
+
+Bản Demo nên triển khai theo hướng:
+
+> **Dùng cloud/free tier để chạy nhanh, nhưng giữ lõi hệ thống theo hướng open-source để sau này có thể self-host.**
+
+Các dịch vụ nên dùng cloud/free tier ở Demo:
+
+* Vercel / Cloudflare Pages cho Frontend.
+* Supabase PostgreSQL cho Database.
+* Cloudflare R2 hoặc Supabase Storage cho Object Storage.
+* Redis Cloud hoặc Upstash Redis cho Cache/Queue.
+* Qdrant Cloud, Pinecone, Weaviate Cloud hoặc pgvector cho Vector DB.
+* LLM API ngoài cho AI inference.
+
+Các thành phần nhóm nên tự build hoặc kiểm soát:
+
+* Backend nghiệp vụ.
+* AI workflow.
+* RAG pipeline.
+* Progress tracking.
+* Git/CI integration.
+* Dashboard cho giảng viên.
+
+---
+
+# 2. Production
+
+## 2.1. Mục tiêu Production
+
+* **Thời gian phát triển:** chưa xác định.
+* **Quy mô:** triển khai cho nhiều lớp/môn học, nhiều sinh viên và giảng viên.
+* **Mục tiêu:** đảm bảo hiệu suất, bảo mật, khả năng mở rộng, kiểm soát dữ liệu và tính sẵn sàng cao.
+
+Ở Production, hệ thống nên đi theo hướng:
+
+> **Open-source core + self-host toàn bộ tài nguyên quan trọng + High Availability.**
+
+Khác với Demo, Production không nên phụ thuộc vào free tier vì dễ gặp giới hạn quota, thay đổi chính sách, khó kiểm soát dữ liệu và khó đảm bảo vận hành dài hạn.
+
+---
+
+## 2.2. Chi tiết triển khai Production
+
+| Thành phần            | Mô tả                                              | Công nghệ đề xuất                                               | Yêu cầu HA                                |
+| --------------------- | -------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------- |
+| Frontend              | Giao diện cho Lecturer và Student                  | Next.js/React deploy trên Kubernetes hoặc Nginx                 | Chạy nhiều replica                        |
+| Backend               | Xử lý nghiệp vụ chính                              | Service tự build, có thể tham khảo Moodle/Open edX/Canvas/Sakai | Stateless, scale ngang nhiều replica      |
+| API Gateway / Ingress | Routing, TLS, auth, rate limit                     | Kong Gateway OSS / Nginx Ingress / Traefik / Envoy Gateway      | Tối thiểu 2 replica                       |
+| Database              | Lưu dữ liệu người dùng, bài tập, kết quả, progress | PostgreSQL + CloudNativePG                                      | Primary/replica, backup định kỳ           |
+| Redis / Cache         | Cache, session, queue nhẹ                          | Redis Sentinel / Redis Cluster / Valkey                         | HA, có replica                            |
+| Object Storage        | Lưu file tài liệu, bài nộp, artifact, backup       | MinIO Distributed                                               | Nhiều node/disk, chịu lỗi                 |
+| Vector Database       | Lưu embedding cho RAG                              | Qdrant self-host / Weaviate self-host / pgvector                | Replica/sharding tùy quy mô               |
+| Message Queue         | Điều phối job nặng giữa các service                | RabbitMQ / NATS / Kafka                                         | Cluster mode                              |
+| AI Service            | AI tutor, guardrails, prompt workflow              | LangChain, LlamaIndex, Haystack, RAGFlow hoặc service tự build  | Tách khỏi backend chính, scale riêng      |
+| Embedding Service     | Sinh embedding cho tài liệu                        | sentence-transformers, TEI hoặc API nội bộ                      | Scale theo số job                         |
+| Git Repo              | Quản lý mã nguồn bài nộp/project                   | Gitea self-host                                                 | Dữ liệu đặt trên SSD/NVMe, backup định kỳ |
+| CI/Autograding        | Chạy test, kiểm tra code, sinh feedback            | Jenkins, Gitea Actions Runner, Woodpecker CI hoặc worker riêng  | Tách node riêng, có queue                 |
+| Monitoring & Logging  | Giám sát, log, tracing, alert                      | Prometheus, Grafana, Loki, Tempo, Alertmanager                  | Lưu trữ riêng, retention policy           |
+| Backup                | Sao lưu dữ liệu quan trọng                         | pgBackRest, Velero, Restic, MinIO backup/replication            | Backup ngoài cụm                          |
+
+---
+
+## 2.3. Cấu hình Production khuyến nghị
+
+### Mức Production tối thiểu
+
+Phù hợp cho giai đoạn pilot production hoặc triển khai nội bộ quy mô nhỏ.
+
+| Nhóm node       |                              Số node | Vai trò                                        | Cấu hình gợi ý               |
+| --------------- | -----------------------------------: | ---------------------------------------------- | ---------------------------- |
+| Kubernetes node |                                    3 | Chạy app, database, storage, monitoring cơ bản | 8–16 core, 32–64 GB RAM/node |
+| Storage         | Dùng chung trên node hoặc disk riêng | PostgreSQL, MinIO, Gitea, Qdrant               | SSD/NVMe khuyến nghị         |
+
+Cụm 3 node có thể đạt HA cơ bản, nhưng workload vẫn còn trộn nhiều. Không nên xem đây là cấu hình tối ưu cho quy mô lớn.
+
+---
+
+### Mức Production khuyến nghị
+
+Phù hợp hơn nếu muốn triển khai nghiêm túc, có HA và tách workload rõ ràng.
+
+| Nhóm node           | Số node | Vai trò                                           | Cấu hình gợi ý                         |
+| ------------------- | ------: | ------------------------------------------------- | -------------------------------------- |
+| Control-plane/Infra |       3 | Kubernetes control-plane, ingress, monitoring nhẹ | 4–8 core, 16–32 GB RAM                 |
+| App node            |       2 | Frontend, backend API, auth, dashboard            | 8–16 core, 32–64 GB RAM                |
+| Data node           |       3 | PostgreSQL HA, Qdrant, Redis/Valkey, MinIO        | 16 core, 64–128 GB RAM, NVMe + SSD/HDD |
+| Worker/CI node      |     1–2 | AI/RAG worker, CI runner, sandbox                 | 16–32 core, 64–128 GB RAM              |
+| GPU node            |     0–2 | Self-host LLM/embedding nếu cần                   | Tùy model và ngân sách                 |
+
+Với Production, điểm quan trọng không chỉ là tổng CPU/RAM, mà là **tách workload**. Đặc biệt, không nên để CI/autograding hoặc RAG worker chạy chung với database node vì các job này có thể tiêu tốn CPU/RAM đột biến.
+
+---
+
+## 2.4. Kết luận Production
+
+Bản Production nên triển khai theo hướng:
+
+> **Self-host trên Kubernetes, dùng open-source, có HA cho các thành phần quan trọng.**
+
+Các thành phần nên self-host:
+
+* PostgreSQL HA bằng CloudNativePG.
+* Redis/Valkey HA.
+* MinIO Distributed cho object storage.
+* Qdrant/Weaviate/pgvector cho vector database.
+* Gitea cho Git repository.
+* Jenkins/Gitea Actions Runner/Woodpecker CI cho CI/autograding.
+* Prometheus, Grafana, Loki, Tempo cho monitoring/logging.
+* Kong/Nginx/Traefik/Envoy Gateway cho gateway/ingress.
+
+Production có thể vẫn dùng LLM API ngoài ở giai đoạn đầu nếu chưa có GPU, nhưng dữ liệu chính như user, course, progress, repository, file bài nộp, vector index và log vận hành nên nằm trong hạ tầng self-host.
+
+---
+
+# 3. Bottleneck
+
+| Bottleneck                                         | Mô tả                                                                                                                                                    | Giải pháp                                                                                                                                                          |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Nhiều sinh viên hỏi AI cùng lúc                    | Khi nhiều sinh viên cùng chat với AI tutor, backend và AI service dễ bị nghẽn, đặc biệt nếu mỗi request đều gọi LLM và RAG.                              | Tách AI service khỏi backend chính, dùng queue cho request nặng, streaming response, rate limit theo user/course, cache câu hỏi phổ biến.                          |
+| RAG retrieval nhiều request cùng lúc               | Mỗi câu hỏi cần truy vấn vector database, lấy context, rerank và ghép prompt. Nếu không filter tốt, truy vấn sẽ chậm.                                    | Chia collection theo course/môn học, dùng metadata filter theo bài học/rubric/project, giới hạn top-k, cache context thường dùng.                                  |
+| Giảng viên upload tài liệu lớn                     | PDF, slide, giáo trình lớn cần parse, chunk, embedding và indexing. Nếu xử lý trực tiếp trong backend sẽ làm chậm toàn hệ thống.                         | Upload file vào object storage, xử lý async qua queue, tách RAG worker riêng, giới hạn dung lượng file, hiển thị trạng thái xử lý tài liệu.                        |
+| Gần deadline, nhiều sinh viên push code và chạy CI | Khi nhiều nhóm cùng push code hoặc tạo pull request, CI/autograding tiêu tốn nhiều CPU/RAM và có thể ảnh hưởng backend/database.                         | Tách CI runner sang node riêng, giới hạn số job chạy đồng thời, đặt timeout cho job, dùng queue cho webhook, lưu artifact/log vào object storage thay vì Git repo. |
+| Dashboard truy vấn nhiều learning events           | Dashboard của giảng viên cần thống kê progress, số lần hỏi AI, trạng thái project, kết quả CI. Query trực tiếp trên bảng events lớn sẽ gây tải database. | Tạo summary table/materialized view, batch insert learning events, partition theo course/time, dùng read replica hoặc event warehouse riêng cho analytics.         |
+| Vector DB và database bị quá tải                   | Khi số lượng tài liệu, embedding, chat log, progress và event tăng, database và vector database dễ chậm nếu thiếu index/cache/filter.                    | Thiết kế index hợp lý, partition dữ liệu theo course/time, cleanup dữ liệu cũ, cache metadata, dùng NVMe cho data node, scale replica/sharding khi cần.            |
+
+---
+
+# 4. Kết luận ngắn
+
+Bản Demo nên ưu tiên triển khai nhanh bằng các dịch vụ cloud/free tier như Vercel, Supabase, Cloudflare R2, Redis Cloud/Upstash và Qdrant/Pinecone/Weaviate Cloud. Server Demo chỉ cần chạy backend, AI/RAG service, Gitea nhỏ và gateway nếu cần. Với 10–15 người dùng, cấu hình khuyến nghị là khoảng 4 vCPU, 4–8 GB RAM và 40–80 GB SSD.
+
+Bản Production nên chuyển sang self-host, triển khai trên Kubernetes và dùng các công nghệ open-source có hỗ trợ HA như CloudNativePG, MinIO Distributed, Redis/Valkey HA, Qdrant/Weaviate self-host, Gitea, Jenkins/Gitea Runner, Kong/Nginx Ingress và Prometheus/Grafana/Loki. Mục tiêu là kiểm soát dữ liệu, giảm phụ thuộc vendor, dễ mở rộng và đảm bảo vận hành ổn định khi số lượng người dùng tăng.
